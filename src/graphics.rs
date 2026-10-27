@@ -17,7 +17,10 @@ mod retained;
 #[cfg(any(target_os = "vita", test))]
 mod suballoc;
 mod types;
-pub use layout::{TargetFootprint, TargetLayout, TextureLayout, target_layout, texture_layout};
+pub use layout::{
+    MipLayout, TargetFootprint, TargetLayout, TextureLayout, mip_layout, mip_texture_layout,
+    target_layout, texture_layout,
+};
 pub use types::*;
 #[cfg(target_os = "vita")]
 mod commands;

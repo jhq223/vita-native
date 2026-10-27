@@ -328,6 +328,18 @@ impl Context {
                     sceGxmTextureSetMinFilter(&mut raw, f)
                 })?;
             }
+            if !t.0.strided {
+                self.command("texture mip filter", unsafe {
+                    sceGxmTextureSetMipFilter(
+                        &mut raw,
+                        if t.mip_count() > 1 {
+                            SCE_GXM_TEXTURE_MIP_FILTER_ENABLED
+                        } else {
+                            SCE_GXM_TEXTURE_MIP_FILTER_DISABLED
+                        },
+                    )
+                })?;
+            }
             self.command("fragment texture", unsafe {
                 sceGxmSetFragmentTexture(c, unit as u32, &raw)
             })?;

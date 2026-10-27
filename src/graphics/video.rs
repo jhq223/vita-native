@@ -123,6 +123,7 @@ impl Context {
                 size: sizes[index],
                 format: formats[index],
                 strided: false,
+                mip_count: 1,
                 owner: self.0.core.clone(),
             })));
         }
