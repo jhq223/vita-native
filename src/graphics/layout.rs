@@ -178,8 +178,23 @@ pub(crate) fn morton_bc(
     }
     Ok(())
 }
+#[cfg(any(target_os = "vita", test))]
+pub(crate) fn upload_span(rows: u32, stride: usize, packed: usize) -> Option<usize> {
+    (rows.checked_sub(1)? as usize)
+        .checked_mul(stride)?
+        .checked_add(packed)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn upload_span_rejects_overflow_before_touching_memory() {
+        assert_eq!(super::upload_span(3, 16, 12), Some(44));
+        assert_eq!(super::upload_span(1, usize::MAX, 12), Some(12));
+        assert_eq!(super::upload_span(2, usize::MAX, 12), None);
+        assert_eq!(super::upload_span(0, 16, 12), None);
+    }
+
     use super::*;
     #[test]
     fn mip_offsets_match_official_npot_table_and_bc_tails() {

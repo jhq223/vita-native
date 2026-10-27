@@ -247,7 +247,7 @@ impl Context {
     ) -> Result<Texture> {
         self.allocate_texture(size, format, false, false, count)
     }
-    /// Write uncompressed mip rows after the allocation's submitted readers finish.
+    /// Write rows of an ordinary uncompressed sampled mip texture after its readers finish.
     /// Source bytes are consumed synchronously; padding follows the native mip layout.
     pub fn upload_mip_rows(
         &self,
@@ -261,11 +261,13 @@ impl Context {
         self.same(&t.0.owner)?;
         let mip = layout::mip_layout(t.size(), t.format(), t.mip_count(), level)?;
         let packed = mip.size[0] as usize * t.format().pixel_bytes();
-        if t.format().compressed()
+        if t.0.strided
+            || !t.0.allocation.writable()
+            || t.format().compressed()
             || rows == 0
             || row.checked_add(rows).is_none_or(|n| n > mip.size[1])
             || stride < packed
-            || data.len() < (rows as usize - 1) * stride + packed
+            || layout::upload_span(rows, stride, packed).is_none_or(|span| span > data.len())
         {
             return Err(Error::Invalid("mip upload rows"));
         }
@@ -356,7 +358,7 @@ impl Context {
             || !t.0.allocation.writable()
             || t.format().compressed()
             || stride < row
-            || data.len() < (size[1] as usize - 1) * stride + row
+            || layout::upload_span(size[1], stride, row).is_none_or(|span| span > data.len())
             || (0..2).any(|i| {
                 origin[i]
                     .checked_add(size[i])
