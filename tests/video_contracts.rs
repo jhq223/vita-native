@@ -11,6 +11,8 @@ pub use info::Info;
 mod input;
 #[path = "../src/video/metadata.rs"]
 mod metadata;
+#[path = "../src/video/pcm.rs"]
+mod pcm;
 #[path = "../src/video/timing.rs"]
 mod timing;
 use std::{

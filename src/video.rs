@@ -13,6 +13,7 @@ mod info;
 mod input;
 mod metadata;
 mod native;
+mod pcm;
 mod timing;
 pub use info::Info;
 pub use native::{Player, VideoCopy};

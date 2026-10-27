@@ -1,4 +1,9 @@
-use super::{Audio, Info, Picture, Poll, Source, input::read_at, metadata};
+use super::{
+    Audio, Info, Picture, Poll, Source,
+    input::read_at,
+    metadata,
+    pcm::{self, Packet as PendingAudio},
+};
 use crate::app::{
     memory::{MemoryBlock, MemoryBudget, MemoryKind, MemoryLayout, MemoryReservation},
     sdk,
@@ -22,7 +27,6 @@ use std::{
 const INPUT_BYTES: usize = 64 << 10;
 const ALLOCATIONS: usize = 256;
 const MAX_PCM_BYTES: u32 = 256 << 10;
-const PCM_FRAMES: usize = 1024;
 
 struct Allocator {
     budget: Arc<dyn MemoryBudget>,
@@ -164,14 +168,6 @@ unsafe extern "C" fn read_file(
             -1
         }
     }
-}
-
-struct PendingAudio {
-    bytes: usize,
-    offset: usize,
-    rate: u32,
-    channels: usize,
-    first_sample: u64,
 }
 
 /// A synchronous frame-copy operation. Its SDK storage can only be consumed
@@ -595,7 +591,8 @@ impl Player {
     }
     /// Initialize at most 1024 owned stereo frames in the caller's pre-reserved
     /// output. Pending performs no float allocation or initialization. Larger
-    /// SDK packets retain one budgeted integer copy, bounded at 256 KiB.
+    /// SDK packets retain one budgeted integer copy, bounded at 256 KiB. Short
+    /// packets convert directly from SDK storage during this call.
     pub fn poll_audio(&mut self, output: &mut Vec<[f32; 2]>) -> Result<Poll<Audio>, String> {
         self.check()?;
         if self.pending_audio.is_none() {
@@ -632,6 +629,36 @@ impl Player {
             {
                 return Err("AvPlayer returned unowned PCM storage".into());
             }
+            let rate = u64::from(details.sampleRate);
+            let first_sample =
+                pcm::first_sample(self.audio_next, raw.timeStamp, details.sampleRate);
+            let mut packet = PendingAudio {
+                bytes,
+                offset: 0,
+                rate: details.sampleRate,
+                channels,
+                first_sample,
+            };
+            let frames = packet.frames();
+            // Consume SDK PCM synchronously within this poll; its pointer never escapes.
+            let source = unsafe { std::slice::from_raw_parts(raw.pData, bytes) };
+            let mut reserve_error = None;
+            if frames <= pcm::CHUNK_FRAMES {
+                match packet.write(source, self.origin, output) {
+                    Ok(pts) => {
+                        self.audio_next = Some(first_sample.saturating_add(frames as u64));
+                        self.audio_position = raw
+                            .timeStamp
+                            .saturating_add((frames as u64 * 1000).div_ceil(rate));
+                        return Ok(Poll::Ready(Audio {
+                            pts,
+                            sample_rate: details.sampleRate,
+                            frames,
+                        }));
+                    }
+                    Err(error) => reserve_error = Some(error),
+                }
+            }
             if self
                 .audio_buffer
                 .as_ref()
@@ -644,73 +671,36 @@ impl Player {
             }
             unsafe {
                 ptr::copy_nonoverlapping(
-                    raw.pData,
+                    source.as_ptr(),
                     self.audio_buffer.as_ref().unwrap().pointer().cast::<u8>(),
                     bytes,
                 );
             }
-            let rate = u64::from(details.sampleRate);
-            let reported = raw.timeStamp.saturating_mul(rate) / 1000;
-            let first_sample = self
-                .audio_next
-                .filter(|&next| next.abs_diff(reported) <= rate.div_ceil(1000))
-                .unwrap_or(reported);
-            let frames = bytes / (channels * 2);
             self.audio_next = Some(first_sample.saturating_add(frames as u64));
             self.audio_position = raw
                 .timeStamp
                 .saturating_add((frames as u64 * 1000).div_ceil(rate));
-            self.pending_audio = Some(PendingAudio {
-                bytes,
-                offset: 0,
-                rate: details.sampleRate,
-                channels,
-                first_sample,
-            });
+            self.pending_audio = Some(packet);
+            if let Some(error) = reserve_error {
+                return Err(error);
+            }
         }
         let pending = self.pending_audio.as_mut().unwrap();
-        let stride = pending.channels * 2;
-        let frames = PCM_FRAMES.min((pending.bytes - pending.offset) / stride);
-        output.clear();
-        output
-            .try_reserve_exact(frames)
-            .map_err(|e| e.to_string())?;
         let source = unsafe {
             std::slice::from_raw_parts(
-                self.audio_buffer
-                    .as_ref()
-                    .unwrap()
-                    .pointer()
-                    .cast::<u8>()
-                    .add(pending.offset),
-                frames * stride,
+                self.audio_buffer.as_ref().unwrap().pointer().cast::<u8>(),
+                pending.bytes,
             )
         };
-        for sample in source.chunks_exact(stride) {
-            let left = f32::from(i16::from_le_bytes([sample[0], sample[1]])) / 32768.;
-            output.push([
-                left,
-                if pending.channels == 1 {
-                    left
-                } else {
-                    f32::from(i16::from_le_bytes([sample[2], sample[3]])) / 32768.
-                },
-            ]);
-        }
-        let absolute = pending
-            .first_sample
-            .saturating_add((pending.offset / stride) as u64);
-        let origin = self.origin.saturating_mul(u64::from(pending.rate)) / 1000;
-        let pts = (i128::from(absolute) - i128::from(origin)) as f64 / f64::from(pending.rate);
+        let pts = pending.write(source, self.origin, output)?;
         let sample_rate = pending.rate;
-        pending.offset += frames * stride;
         if pending.offset == pending.bytes {
             self.pending_audio = None;
         }
         Ok(Poll::Ready(Audio {
             pts,
             sample_rate,
-            frames,
+            frames: output.len(),
         }))
     }
     /// Stop the SDK and fence callbacks before releasing stream and allocator
