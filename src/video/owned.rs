@@ -64,7 +64,9 @@ impl Nv12Pool {
         if blocks == 0 || blocks > 64 {
             return Err("owned NV12 pool requires 1..64 physical blocks".into());
         }
-        let metadata_bytes = std::mem::size_of::<PoolInner>()
+        let metadata_bytes = std::mem::size_of::<Metadata>()
+            + 2 * std::mem::size_of::<usize>()
+            + std::mem::size_of::<PoolInner>()
             + 2 * std::mem::size_of::<usize>()
             + blocks
                 * (std::mem::size_of::<MemoryBlock>()
