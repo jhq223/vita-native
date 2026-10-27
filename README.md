@@ -37,8 +37,14 @@ programs and binding names. Programs are prepared once and reused by draws.
 
 Textures and buffers own mapped allocations. Scene submissions retain their inputs
 until fragment completion, and display scanout retains its output independently.
+Bound programs remain owned until replaced or unbound. Presentation uses three
+scanout buffers and native queue admission; resource updates wait for their own users.
 Compatible color surfaces share bounded firmware scheduling targets. Configured
 budgets account for kernel capacity, live payload and infrastructure separately.
+Mapped arenas retain recently used blocks within configurable limits: 8 MiB for
+pixels and 1 MiB for buffers by default. Scheduling targets retain up to 4 MiB
+within their 16 MiB total limit. Allocation pressure releases idle owners; submitted
+work keeps its resources until completion.
 
 ## Ownership and threads
 
@@ -52,7 +58,11 @@ submitted PCM before acknowledging; `stop` joins the worker and releases the por
 
 Video owns a seekable input and an allocation budget supplied by the application.
 Output polling copies each native picture or PCM block into caller-owned storage
-before AvPlayer can recycle it. `Pending`, `Ready` and `End` identify progress.
+before AvPlayer can recycle it. Opening waits for native playback readiness; AAC
+frame lengths exclude padding from the PCM clock. `Pending`, `Ready` and `End`
+identify progress. `Nv12Pool` provides bounded output blocks that seal into immutable
+`SharedNv12` storage. GXM imports those blocks for sampling and retains their mapping
+through fragment completion; the final reader returns each block to its pool.
 
 ## Building
 

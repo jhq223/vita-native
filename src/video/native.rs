@@ -1,4 +1,9 @@
-use super::{Audio, Info, Picture, Poll, Source, input::read_at, metadata};
+use super::{
+    Audio, Info, Picture, Poll, Source,
+    input::read_at,
+    metadata,
+    pcm::{self, Packet as PendingAudio},
+};
 use crate::app::{
     memory::{MemoryBlock, MemoryBudget, MemoryKind, MemoryLayout, MemoryReservation},
     sdk,
@@ -22,7 +27,7 @@ use std::{
 const INPUT_BYTES: usize = 64 << 10;
 const ALLOCATIONS: usize = 256;
 const MAX_PCM_BYTES: u32 = 256 << 10;
-const PCM_FRAMES: usize = 1024;
+const STATE_PLAY: i32 = 3;
 
 struct Allocator {
     budget: Arc<dyn MemoryBudget>,
@@ -115,10 +120,18 @@ unsafe extern "C" fn release(arg: *mut c_void, pointer: *mut c_void) {
 }
 
 struct Input {
+    started: AtomicBool,
     source: Mutex<BufReader<Box<dyn Source>>>,
     length: u64,
     failure: Mutex<Option<String>>,
     _storage: Box<dyn MemoryReservation>,
+}
+unsafe extern "C" fn event(arg: *mut c_void, id: i32, _: i32, _: *mut c_void) {
+    let input = unsafe { &*arg.cast::<Input>() };
+    // SCE_AVPLAYER_STATE_PLAY confirms asynchronous stream setup is complete.
+    if id == STATE_PLAY {
+        input.started.store(true, Ordering::Release);
+    }
 }
 unsafe extern "C" fn open_file(_: *mut c_void, _: *const c_char) -> i32 {
     0
@@ -166,14 +179,6 @@ unsafe extern "C" fn read_file(
     }
 }
 
-struct PendingAudio {
-    bytes: usize,
-    offset: usize,
-    rate: u32,
-    channels: usize,
-    first_sample: u64,
-}
-
 /// A synchronous frame-copy operation. Its SDK storage can only be consumed
 /// inside `poll_video`'s callback, before another native call can recycle it.
 pub struct VideoCopy<'a> {
@@ -204,6 +209,34 @@ impl VideoCopy<'_> {
             [width, height],
             copy_bytes,
         )?;
+        Ok(Picture { pts: self.pts })
+    }
+    /// Copy into exclusive sampled-compatible storage, preserving its padded row
+    /// strides. Sealing the destination afterwards removes every writable alias.
+    pub fn copy_to_native(&self, output: &mut super::Nv12Buffer) -> Result<Picture, String> {
+        let layout = output.layout();
+        if layout.size != [self.info.width, self.info.height] {
+            return Err("native NV12 extent mismatch".into());
+        }
+        let (y, uv) = output.planes_mut();
+        let width = self.info.width as usize;
+        if layout.strides == [width as u32; 2] {
+            return self.copy_into(y, uv);
+        }
+        for (dest, source) in y
+            .chunks_exact_mut(layout.strides[0] as usize)
+            .zip(self.source.chunks_exact(self.stride))
+            .take(self.info.height as usize)
+        {
+            copy_bytes(&mut dest[..width], &source[..width])?;
+        }
+        for (dest, source) in uv
+            .chunks_exact_mut(layout.strides[1] as usize)
+            .zip(self.source[self.stride * self.rows..].chunks_exact(self.stride))
+            .take(self.info.height as usize / 2)
+        {
+            copy_bytes(&mut dest[..width], &source[..width])?;
+        }
         Ok(Picture { pts: self.pts })
     }
     /// Allocate and initialize visible NV12 planes exactly once. The caller's
@@ -249,6 +282,7 @@ pub struct Player {
     origin: u64,
     video_duration: f64,
     audio_endpoint: Option<u64>,
+    audio_frame_samples: usize,
     audio_position: u64,
     audio_next: Option<u64>,
     pending_audio: Option<PendingAudio>,
@@ -285,7 +319,8 @@ fn module() -> Result<(), String> {
 impl Player {
     /// Own the resource stream and initialize this profile's hardware decoder.
     /// Source read-ahead, SPS metadata and native allocation descriptors reserve
-    /// bounded storage before allocation. SDK payload reservations remain exact.
+    /// bounded storage before allocation. Stream setup waits for the native Play
+    /// event before returning, so an immediate seek follows decoder readiness.
     pub fn open(
         mut source: Box<dyn Source>,
         budget: Arc<dyn MemoryBudget>,
@@ -316,6 +351,7 @@ impl Player {
             _slots: slots,
         });
         let mut input = Box::new(Input {
+            started: AtomicBool::new(false),
             source: Mutex::new(source),
             length,
             failure: Mutex::new(None),
@@ -332,6 +368,8 @@ impl Player {
         data.fileReplacement.close = Some(close_file);
         data.fileReplacement.readOffset = Some(read_file);
         data.fileReplacement.size = Some(file_size);
+        data.eventReplacement.objectPointer = (&mut *input as *mut Input).cast();
+        data.eventReplacement.eventCallback = Some(event);
         data.basePriority = 0xa0;
         data.numOutputVideoFrameBuffers = 2;
         data.autoStart = 1;
@@ -351,6 +389,7 @@ impl Player {
             sps_storage: Some(metadata.sps_storage),
             origin: 0,
             audio_endpoint: None,
+            audio_frame_samples: metadata.audio_frame_samples,
             audio_position: 0,
             audio_next: None,
             pending_audio: None,
@@ -405,14 +444,14 @@ impl Player {
                     overall_end = overall_end.max(stream.startTime.saturating_add(stream.duration));
                 }
             }
-            if video && audio {
+            if video && audio && self.input.as_ref().unwrap().started.load(Ordering::Acquire) {
                 if overall_end > self.origin {
                     self.info.duration = overall_end.saturating_sub(self.origin) as f64 / 1000.;
                 }
                 return Ok(());
             }
             if crate::app::time::monotonic_micros().saturating_sub(self.opened) >= 10_000_000 {
-                return Err("AvPlayer did not expose the MP4 tracks within 10 seconds".into());
+                return Err("AvPlayer did not start the MP4 tracks within 10 seconds".into());
             }
             crate::app::time::sleep(Duration::from_millis(2)).map_err(|e| e.to_string())?;
         }
@@ -492,9 +531,12 @@ impl Player {
         self.audio_next = None;
         self.audio_position = 0;
         let position = ((seconds * 1000.) as u64).saturating_add(self.origin);
-        check("seek AvPlayer source", unsafe {
-            sdk::sceAvPlayerJumpToTime(self.handle(), position)
-        })?;
+        let result = unsafe { sdk::sceAvPlayerJumpToTime(self.handle(), position) };
+        if result < 0 {
+            return Err(format!(
+                "seek AvPlayer source to {position} ms: 0x{result:08x}"
+            ));
+        }
         self.seen_active = false;
         self.seen_video = false;
         self.final_picture_received = false;
@@ -593,9 +635,11 @@ impl Player {
         self.final_picture_received = raw.timeStamp >= final_ms;
         Ok(Poll::Ready(copied))
     }
+    /// Copy valid AAC samples, excluding native buffer padding.
     /// Initialize at most 1024 owned stereo frames in the caller's pre-reserved
     /// output. Pending performs no float allocation or initialization. Larger
-    /// SDK packets retain one budgeted integer copy, bounded at 256 KiB.
+    /// SDK packets retain one budgeted integer copy, bounded at 256 KiB. Short
+    /// packets convert directly from SDK storage during this call.
     pub fn poll_audio(&mut self, output: &mut Vec<[f32; 2]>) -> Result<Poll<Audio>, String> {
         self.check()?;
         if self.pending_audio.is_none() {
@@ -622,7 +666,10 @@ impl Player {
                     "AvPlayer returned PCM outside the admitted mono/stereo packet profile".into(),
                 );
             }
-            let bytes = details.size as usize;
+            // AvPlayer can report stereo-sized storage for a mono AAC frame.
+            // The codec frame length determines valid PCM, including 960-sample AAC.
+            let bytes =
+                pcm::payload_bytes(details.size as usize, channels, self.audio_frame_samples);
             if raw.pData.is_null()
                 || !self
                     .memory
@@ -631,6 +678,36 @@ impl Player {
                     .contains(raw.pData as usize, bytes)
             {
                 return Err("AvPlayer returned unowned PCM storage".into());
+            }
+            let rate = u64::from(details.sampleRate);
+            let first_sample =
+                pcm::first_sample(self.audio_next, raw.timeStamp, details.sampleRate);
+            let mut packet = PendingAudio {
+                bytes,
+                offset: 0,
+                rate: details.sampleRate,
+                channels,
+                first_sample,
+            };
+            let frames = packet.frames();
+            // Consume SDK PCM synchronously within this poll; its pointer never escapes.
+            let source = unsafe { std::slice::from_raw_parts(raw.pData, bytes) };
+            let mut reserve_error = None;
+            if frames <= pcm::CHUNK_FRAMES {
+                match packet.write(source, self.origin, output) {
+                    Ok(pts) => {
+                        self.audio_next = Some(first_sample.saturating_add(frames as u64));
+                        self.audio_position = raw
+                            .timeStamp
+                            .saturating_add((frames as u64 * 1000).div_ceil(rate));
+                        return Ok(Poll::Ready(Audio {
+                            pts,
+                            sample_rate: details.sampleRate,
+                            frames,
+                        }));
+                    }
+                    Err(error) => reserve_error = Some(error),
+                }
             }
             if self
                 .audio_buffer
@@ -644,73 +721,36 @@ impl Player {
             }
             unsafe {
                 ptr::copy_nonoverlapping(
-                    raw.pData,
+                    source.as_ptr(),
                     self.audio_buffer.as_ref().unwrap().pointer().cast::<u8>(),
                     bytes,
                 );
             }
-            let rate = u64::from(details.sampleRate);
-            let reported = raw.timeStamp.saturating_mul(rate) / 1000;
-            let first_sample = self
-                .audio_next
-                .filter(|&next| next.abs_diff(reported) <= rate.div_ceil(1000))
-                .unwrap_or(reported);
-            let frames = bytes / (channels * 2);
             self.audio_next = Some(first_sample.saturating_add(frames as u64));
             self.audio_position = raw
                 .timeStamp
                 .saturating_add((frames as u64 * 1000).div_ceil(rate));
-            self.pending_audio = Some(PendingAudio {
-                bytes,
-                offset: 0,
-                rate: details.sampleRate,
-                channels,
-                first_sample,
-            });
+            self.pending_audio = Some(packet);
+            if let Some(error) = reserve_error {
+                return Err(error);
+            }
         }
         let pending = self.pending_audio.as_mut().unwrap();
-        let stride = pending.channels * 2;
-        let frames = PCM_FRAMES.min((pending.bytes - pending.offset) / stride);
-        output.clear();
-        output
-            .try_reserve_exact(frames)
-            .map_err(|e| e.to_string())?;
         let source = unsafe {
             std::slice::from_raw_parts(
-                self.audio_buffer
-                    .as_ref()
-                    .unwrap()
-                    .pointer()
-                    .cast::<u8>()
-                    .add(pending.offset),
-                frames * stride,
+                self.audio_buffer.as_ref().unwrap().pointer().cast::<u8>(),
+                pending.bytes,
             )
         };
-        for sample in source.chunks_exact(stride) {
-            let left = f32::from(i16::from_le_bytes([sample[0], sample[1]])) / 32768.;
-            output.push([
-                left,
-                if pending.channels == 1 {
-                    left
-                } else {
-                    f32::from(i16::from_le_bytes([sample[2], sample[3]])) / 32768.
-                },
-            ]);
-        }
-        let absolute = pending
-            .first_sample
-            .saturating_add((pending.offset / stride) as u64);
-        let origin = self.origin.saturating_mul(u64::from(pending.rate)) / 1000;
-        let pts = (i128::from(absolute) - i128::from(origin)) as f64 / f64::from(pending.rate);
+        let pts = pending.write(source, self.origin, output)?;
         let sample_rate = pending.rate;
-        pending.offset += frames * stride;
         if pending.offset == pending.bytes {
             self.pending_audio = None;
         }
         Ok(Poll::Ready(Audio {
             pts,
             sample_rate,
-            frames,
+            frames: output.len(),
         }))
     }
     /// Stop the SDK and fence callbacks before releasing stream and allocator

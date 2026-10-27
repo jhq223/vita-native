@@ -13,9 +13,14 @@ mod layout;
 #[cfg(any(target_os = "vita", test))]
 mod render_targets;
 #[cfg(any(target_os = "vita", test))]
+mod retained;
+#[cfg(any(target_os = "vita", test))]
 mod suballoc;
 mod types;
-pub use layout::{TargetFootprint, TargetLayout, TextureLayout, target_layout, texture_layout};
+pub use layout::{
+    MipLayout, TargetFootprint, TargetLayout, TextureLayout, mip_layout, mip_texture_layout,
+    target_layout, texture_layout,
+};
 pub use types::*;
 #[cfg(target_os = "vita")]
 mod commands;
@@ -27,6 +32,8 @@ mod memory;
 mod program;
 #[cfg(target_os = "vita")]
 mod resources;
+#[cfg(all(target_os = "vita", feature = "video"))]
+mod video;
 #[cfg(target_os = "vita")]
 pub use commands::Draw;
 #[cfg(target_os = "vita")]

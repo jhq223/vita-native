@@ -16,6 +16,7 @@ pub(super) struct TextureInner {
     pub format: TextureFormat,
     pub layout: TextureLayout,
     pub strided: bool,
+    pub mip_count: u32,
     pub owner: Rc<Core>,
 }
 /// Sampled texture whose native storage survives every submitted reader.
@@ -35,6 +36,10 @@ impl Texture {
     /// Sampling and payload format of the allocation.
     pub fn format(&self) -> TextureFormat {
         self.0.format
+    }
+    /// Number of stored levels, including the base.
+    pub fn mip_count(&self) -> u32 {
+        self.0.mip_count
     }
     /// Exact native row pitch and payload bytes.
     pub fn layout(&self) -> TextureLayout {
@@ -102,7 +107,7 @@ pub struct IndexBuffer {
     pub(super) maximum: u32,
     pub(super) owner: Rc<Core>,
 }
-fn texture_format(f: TextureFormat) -> u32 {
+pub(super) fn texture_format(f: TextureFormat) -> u32 {
     match f {
         TextureFormat::Rgba8 => SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,
         TextureFormat::Bgra8 => SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ARGB,
@@ -162,6 +167,7 @@ impl Context {
         format: TextureFormat,
         strided: bool,
         display: bool,
+        mip_count: u32,
     ) -> Result<Texture> {
         self.check("texture creation")?;
         let l = if strided {
@@ -171,7 +177,7 @@ impl Context {
                 row_stride_bytes: l.row_stride_bytes as usize,
             }
         } else {
-            self.texture_layout(size, format)?
+            layout::mip_texture_layout(size, format, mip_count)?
         };
         let arena = if display {
             &self.0.core.display_pixels
@@ -188,7 +194,7 @@ impl Context {
                     texture_format(format),
                     size[0],
                     size[1],
-                    1,
+                    mip_count,
                 )
             } else if strided {
                 sceGxmTextureInitLinearStrided(
@@ -206,7 +212,7 @@ impl Context {
                     texture_format(format),
                     size[0],
                     size[1],
-                    1,
+                    mip_count,
                 )
             }
         };
@@ -224,38 +230,79 @@ impl Context {
             format,
             layout: l,
             strided,
+            mip_count,
             owner: self.0.core.clone(),
         })))
     }
     /// Allocate an ordinary sampled texture with the pure `texture_layout` contract.
     pub fn create_texture(&self, size: [u32; 2], format: TextureFormat) -> Result<Texture> {
-        self.allocate_texture(size, format, false, false)
+        self.allocate_texture(size, format, false, false, 1)
+    }
+    /// Allocate a complete sampled chain; count includes the base level (SDK mipCount).
+    pub fn create_mip_texture(
+        &self,
+        size: [u32; 2],
+        format: TextureFormat,
+        count: u32,
+    ) -> Result<Texture> {
+        self.allocate_texture(size, format, false, false, count)
+    }
+    /// Write rows of an ordinary uncompressed sampled mip texture after its readers finish.
+    /// Source bytes are consumed synchronously; padding follows the native mip layout.
+    pub fn upload_mip_rows(
+        &self,
+        t: &Texture,
+        level: u32,
+        row: u32,
+        rows: u32,
+        data: &[u8],
+        stride: usize,
+    ) -> Result<()> {
+        self.same(&t.0.owner)?;
+        let mip = layout::mip_layout(t.size(), t.format(), t.mip_count(), level)?;
+        let packed = mip.size[0] as usize * t.format().pixel_bytes();
+        if t.0.strided
+            || !t.0.allocation.writable()
+            || t.format().compressed()
+            || rows == 0
+            || row.checked_add(rows).is_none_or(|n| n > mip.size[1])
+            || stride < packed
+            || layout::upload_span(rows, stride, packed).is_none_or(|span| span > data.len())
+        {
+            return Err(Error::Invalid("mip upload rows"));
+        }
+        self.await_allocation(&t.0.allocation)?;
+        for y in 0..rows as usize {
+            t.0.allocation.write(
+                mip.offset + (row as usize + y) * mip.layout.row_stride_bytes,
+                &data[y * stride..y * stride + packed],
+            );
+        }
+        Ok(())
     }
     /// Allocate the same explicit row pitch reported by `target_layout`.
     pub fn create_target_texture(&self, size: [u32; 2]) -> Result<Texture> {
-        self.allocate_texture(size, TextureFormat::Rgba8, true, false)
+        self.allocate_texture(size, TextureFormat::Rgba8, true, false, 1)
     }
     pub(super) fn create_display_texture(&self, size: [u32; 2]) -> Result<Texture> {
-        self.allocate_texture(size, TextureFormat::Rgba8, true, true)
+        self.allocate_texture(size, TextureFormat::Rgba8, true, true, 1)
     }
     /// Reorder row-major BC blocks directly into final mapped Morton storage.
-    /// The staging argument is retained for the shared adapter and may be empty.
     pub fn create_bc_texture(
         &self,
         size: [u32; 2],
         format: TextureFormat,
         blocks: &[u8],
-        _staging: &mut [u8],
     ) -> Result<Texture> {
         if !format.compressed() {
             return Err(Error::Invalid("BC format"));
         }
         let texture = self.create_texture(size, format)?;
-        self.upload_bc_texture(&texture, blocks, &mut [])?;
+        self.upload_bc_texture(&texture, blocks)?;
         Ok(texture)
     }
-    /// Replace BC payload after its readers complete; busy data uses an owned ordered transfer.
-    pub fn upload_bc_texture(&self, t: &Texture, blocks: &[u8], _staging: &mut [u8]) -> Result<()> {
+    /// Wait for this texture's users, then reorder BC blocks into its mapped storage.
+    pub fn upload_bc_texture(&self, t: &Texture, blocks: &[u8]) -> Result<()> {
         self.same(&t.0.owner)?;
         if !t.0.format.compressed() || blocks.len() != t.0.layout.bytes {
             return Err(Error::Invalid("BC payload"));
@@ -264,16 +311,34 @@ impl Context {
         let dst = unsafe {
             core::slice::from_raw_parts_mut(t.0.allocation.ptr().cast(), t.0.layout.bytes)
         };
-        layout::morton_bc(
-            t.size(),
-            if t.format() == TextureFormat::Bc1Rgb {
-                8
-            } else {
-                16
-            },
-            blocks,
-            dst,
-        )
+        let n = if t.format() == TextureFormat::Bc1Rgb {
+            8
+        } else {
+            16
+        };
+        for level in 0..t.mip_count() {
+            let mip = layout::mip_layout(t.size(), t.format(), t.mip_count(), level)?;
+            let range = mip.offset..mip.offset + mip.layout.bytes;
+            layout::morton_bc(
+                mip.size.map(|v| v.max(4)),
+                n,
+                &blocks[range.clone()],
+                &mut dst[range],
+            )?;
+        }
+        Ok(())
+    }
+    /// Copy offline GXM Morton BC blocks directly into mapped texture storage.
+    /// Input must have the physical power-of-two extent reported by texture_layout.
+    /// Waits only for this allocation's submitted users before overwriting it.
+    pub fn upload_bc_morton_texture(&self, t: &Texture, blocks: &[u8]) -> Result<()> {
+        self.same(&t.0.owner)?;
+        if !t.0.format.compressed() || blocks.len() != t.0.layout.bytes {
+            return Err(Error::Invalid("Morton BC payload"));
+        }
+        self.await_allocation(&t.0.allocation)?;
+        t.0.allocation.write(0, blocks);
+        Ok(())
     }
     /// Consume CPU rows before returning. In-flight textures use staged GPU copies,
     /// ordered between fragment scenes and retired by a transfer notification.
@@ -290,9 +355,10 @@ impl Context {
         let bpp = t.format().pixel_bytes();
         let row = size[0] as usize * bpp;
         if size.contains(&0)
+            || !t.0.allocation.writable()
             || t.format().compressed()
             || stride < row
-            || data.len() < (size[1] as usize - 1) * stride + row
+            || layout::upload_span(size[1], stride, row).is_none_or(|span| span > data.len())
             || (0..2).any(|i| {
                 origin[i]
                     .checked_add(size[i])
@@ -477,11 +543,21 @@ impl Context {
             TextureFormat::Bgra8 => SCE_GXM_COLOR_FORMAT_A8R8G8B8,
             _ => return Err(Error::Unsupported("framebuffer color format")),
         };
-        let target = self
-            .0
-            .targets
-            .borrow_mut()
-            .get_or_create(t.size(), |size| RenderTarget::new(&self.0.core, size))?;
+        let bytes = self
+            .target_footprint(t.size())?
+            .render_target_driver_bytes
+            .unwrap();
+        let mut pool = self.0.targets.borrow_mut();
+        if !pool.contains(t.size())?
+            && self.0.core.rt_bytes.get().saturating_add(bytes)
+                > self.0.core.config.render_target_bytes
+        {
+            pool.release_idle();
+        }
+        let target = pool.get_or_create(t.size(), bytes, |size| {
+            RenderTarget::new(&self.0.core, size)
+        })?;
+        drop(pool);
         let mut sync = core::ptr::null_mut();
         let mut surface = unsafe { core::mem::zeroed() };
         let outcome = (|| {
@@ -700,7 +776,7 @@ impl Context {
         b.maximum = maximum;
         Ok(())
     }
-    /// Production capture only: complete submitted work and copy top-left visible RGBA rows.
+    /// Capture top-left visible RGBA rows after this target's users complete.
     pub fn read_rgba(&self, target: &Framebuffer, output: &mut [u8]) -> Result<()> {
         self.same(&target.0.owner)?;
         if target.texture().format() != TextureFormat::Rgba8
@@ -708,8 +784,8 @@ impl Context {
         {
             return Err(Error::Invalid("capture extent"));
         }
-        self.finish()?;
         let t = &target.0.texture;
+        self.await_allocation(&t.0.allocation)?;
         let row = target.size()[0] as usize * 4;
         for (y, dest) in output.chunks_exact_mut(row).enumerate() {
             let source = unsafe {

@@ -78,6 +78,8 @@ pub struct Stream {
 impl Stream {
     /// Open a paused main port and start its worker. Construction preallocates
     /// both native PCM blocks. Scheduling denial is reported through `fault`.
+    /// Both callbacks run on the output worker and must avoid allocation, file IO
+    /// and blocking on other threads.
     pub fn new(
         mut render: impl FnMut(&mut [i16], u64) + Send + 'static,
         fault: impl Fn(Error) + Send + 'static,

@@ -2,7 +2,7 @@
 use super::suballoc::FreeList;
 use super::{ArenaUsage, DeviceFault, Error, types::Result};
 use std::{
-    cell::{OnceCell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     ffi::c_void,
     ops::Range,
     prelude::v1::*,
@@ -113,7 +113,7 @@ impl Block {
     fn allocate(self: &Rc<Self>, bytes: usize, alignment: usize) -> Option<Allocation> {
         let range = self.free.borrow_mut().take(bytes, alignment)?;
         Some(Allocation(Rc::new(AllocationInner {
-            block: self.clone(),
+            storage: Storage::Arena(self.clone()),
             range,
         })))
     }
@@ -142,27 +142,44 @@ impl Drop for Block {
             .ok();
     }
 }
+enum Storage {
+    Arena(Rc<Block>),
+    #[cfg(feature = "video")]
+    Video(Rc<super::video::Import>),
+}
 struct AllocationInner {
-    block: Rc<Block>,
+    storage: Storage,
     range: Range<usize>,
 }
 impl Drop for AllocationInner {
     fn drop(&mut self) {
-        self.block.free.borrow_mut().release(self.range.clone());
+        match &self.storage {
+            Storage::Arena(block) => block.free.borrow_mut().release(self.range.clone()),
+            #[cfg(feature = "video")]
+            Storage::Video(_) => {}
+        }
     }
 }
 #[derive(Clone)]
 pub(super) struct Allocation(Rc<AllocationInner>);
 impl Allocation {
     pub fn ptr(&self) -> *mut c_void {
-        unsafe {
-            self.0
-                .block
-                .base
-                .cast::<u8>()
-                .add(self.0.range.start)
-                .cast()
-        }
+        let base = match &self.0.storage {
+            Storage::Arena(block) => block.base as usize,
+            #[cfg(feature = "video")]
+            Storage::Video(import) => import.pointer(),
+        };
+        (base + self.0.range.start) as *mut c_void
+    }
+    pub fn writable(&self) -> bool {
+        matches!(self.0.storage, Storage::Arena(_))
+    }
+    #[cfg(feature = "video")]
+    pub fn video(import: Rc<super::video::Import>, range: Range<usize>) -> Self {
+        Self(Rc::new(AllocationInner {
+            storage: Storage::Video(import),
+            range,
+        }))
     }
     pub fn len(&self) -> usize {
         self.0.range.len()
@@ -174,7 +191,7 @@ impl Allocation {
         Rc::strong_count(&self.0) > 1
     }
     pub fn write(&self, offset: usize, bytes: &[u8]) {
-        assert!(offset + bytes.len() <= self.len());
+        assert!(self.writable() && offset + bytes.len() <= self.len());
         unsafe {
             core::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
@@ -188,11 +205,13 @@ pub(super) struct Arena {
     kind: Kind,
     quantum: usize,
     blocks: RefCell<Vec<Weak<Block>>>,
+    warm: RefCell<super::retained::Retained<Block>>,
+    block_allocations: Cell<u64>,
     fault: Fault,
     limit: u64,
 }
 impl Arena {
-    pub fn new(kind: Kind, fault: &Fault, limit: u64) -> Self {
+    pub fn new(kind: Kind, fault: &Fault, limit: u64, retained: u64) -> Self {
         Self {
             kind,
             quantum: if kind == Kind::Cdram {
@@ -201,6 +220,8 @@ impl Arena {
                 64 * 1024
             },
             blocks: RefCell::new(Vec::new()),
+            warm: RefCell::new(super::retained::Retained::new(retained.min(limit))),
+            block_allocations: Cell::new(0),
             fault: fault.clone(),
             limit,
         }
@@ -214,14 +235,10 @@ impl Arena {
         blocks.retain(|b| b.strong_count() > 0);
         for block in blocks.iter().filter_map(Weak::upgrade) {
             if let Some(a) = block.allocate(bytes, alignment) {
+                self.warm.borrow_mut().touch(&block, block.bytes as u64);
                 return Ok(a);
             }
         }
-        let used: u64 = blocks
-            .iter()
-            .filter_map(Weak::upgrade)
-            .map(|b| b.bytes as u64)
-            .sum();
         let block_bytes = bytes
             .max(self.quantum)
             .next_multiple_of(if self.kind == Kind::Cdram {
@@ -229,6 +246,18 @@ impl Arena {
             } else {
                 4096
             });
+        let capacity = || {
+            blocks
+                .iter()
+                .filter_map(Weak::upgrade)
+                .map(|b| b.bytes as u64)
+                .sum::<u64>()
+        };
+        if capacity().saturating_add(block_bytes as u64) > self.limit {
+            self.release_idle();
+            self.fault.check()?;
+        }
+        let used = capacity();
         if used + block_bytes as u64 > self.limit {
             return Err(Error::Budget {
                 domain: if self.kind == Kind::Cdram {
@@ -243,14 +272,26 @@ impl Arena {
         let block = Block::new(block_bytes, self.kind, &self.fault)?;
         let allocation = block.allocate(bytes, alignment).expect("new aligned block");
         blocks.push(Rc::downgrade(&block));
+        self.block_allocations.set(self.block_allocations.get() + 1);
+        self.warm.borrow_mut().touch(&block, block.bytes as u64);
         Ok(allocation)
     }
+    pub fn release_idle(&self) {
+        self.warm.borrow_mut().release_idle();
+    }
     pub fn usage(&self) -> ArenaUsage {
-        let mut u = ArenaUsage::default();
+        let mut u = ArenaUsage {
+            block_allocations: self.block_allocations.get(),
+            ..ArenaUsage::default()
+        };
         for b in self.blocks.borrow().iter().filter_map(Weak::upgrade) {
             u.blocks += 1;
             u.reserved_bytes += b.bytes as u64;
-            u.used_bytes += (b.bytes - b.free.borrow().bytes()) as u64;
+            let used = b.bytes - b.free.borrow().bytes();
+            u.used_bytes += used as u64;
+            if used == 0 {
+                u.idle_bytes += b.bytes as u64;
+            }
         }
         u
     }

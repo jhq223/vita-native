@@ -1,7 +1,7 @@
 //! Ordered direct GXM draw records with exact fragment clipping.
 use super::types::Result;
 use super::{
-    device::{Clear, Lease, Recording},
+    device::{BoundProgram, Clear, Lease, Recording},
     *,
 };
 use std::{ops::Range, prelude::v1::*, rc::Rc};
@@ -20,7 +20,7 @@ pub struct Draw<'a> {
     pub indices: Option<&'a IndexBuffer>,
     /// Half-open element or sequential-vertex range.
     pub range: Range<u32>,
-    /// Fragment texture units in compiled TEXUNIT order.
+    /// Fragment texture units in compiled TEXUNIT order, covering every declared sampler.
     pub textures: &'a [&'a Texture],
     /// Complete numeric/fixed-sampler values for this draw.
     pub uniforms: &'a [UniformValue<'a>],
@@ -73,16 +73,7 @@ impl Context {
                 Ok(f.clone())
             }
             Target::Screen => {
-                let mut s = self.0.state.borrow_mut();
-                let native = &self.0.core.native;
-                // Admit the bounded display slot before submitting work to its scanout buffer.
-                if s.presents.wrapping_sub(native.display_completed()) >= 2 {
-                    s.display_waits += 1;
-                    self.command("sceGxmDisplayQueueFinish(screen admission)", unsafe {
-                        sceGxmDisplayQueueFinish()
-                    })?;
-                    self.check("screen admission")?;
-                }
+                let s = self.0.state.borrow();
                 Ok(self.0.screens.borrow()[s.screen].clone())
             }
         }
@@ -204,6 +195,7 @@ impl Context {
         if d.size.contains(&0)
             || d.range.start > d.range.end
             || d.textures.len() > 16
+            || d.textures.len() < d.program.0.texture_slots
             || d.program.0.stride != d.vertices.stride
             || d.program.0.attributes != d.vertices.attributes
         {
@@ -270,12 +262,27 @@ impl Context {
             Self::retain(r, Lease::Allocation(t.0.allocation.clone()));
         }
         let c = self.0.core.native.context;
+        let variants = [
+            usize::from(index_width == 4),
+            usize::from(d.blend == Blend::Premultiplied),
+        ];
+        let mut bound = self.0.bound_program.borrow_mut();
+        if bound
+            .as_ref()
+            .is_none_or(|b| !Rc::ptr_eq(&b.program.0, &d.program.0) || b.variants != variants)
+        {
+            unsafe {
+                sceGxmSetVertexProgram(c, d.program.0.vertex[variants[0]]);
+                sceGxmSetFragmentProgram(c, d.program.0.fragment[variants[1]]);
+            }
+            // Context bindings outlive submissions; replace ownership after both native binds.
+            *bound = Some(BoundProgram {
+                program: d.program.clone(),
+                variants,
+            });
+        }
+        drop(bound);
         unsafe {
-            sceGxmSetVertexProgram(c, d.program.0.vertex[usize::from(index_width == 4)]);
-            sceGxmSetFragmentProgram(
-                c,
-                d.program.0.fragment[usize::from(d.blend == Blend::Premultiplied)],
-            );
             sceGxmSetRegionClip(
                 c,
                 SCE_GXM_REGION_CLIP_OUTSIDE,
@@ -287,7 +294,7 @@ impl Context {
         }
         let mut vertex = core::ptr::null_mut();
         let mut fragment = core::ptr::null_mut();
-        let sizes = d.program.0.uniform_sizes();
+        let sizes = d.program.0.uniform_sizes;
         if sizes[0] > 0 {
             self.command("reserve vertex uniforms", unsafe {
                 sceGxmReserveVertexDefaultUniformBuffer(c, &mut vertex)
@@ -319,6 +326,18 @@ impl Context {
             if !t.0.strided {
                 self.command("texture min filter", unsafe {
                     sceGxmTextureSetMinFilter(&mut raw, f)
+                })?;
+            }
+            if !t.0.strided {
+                self.command("texture mip filter", unsafe {
+                    sceGxmTextureSetMipFilter(
+                        &mut raw,
+                        if t.mip_count() > 1 && matches!(filter, TextureFilter::Linear) {
+                            SCE_GXM_TEXTURE_MIP_FILTER_ENABLED
+                        } else {
+                            SCE_GXM_TEXTURE_MIP_FILTER_DISABLED
+                        },
+                    )
                 })?;
             }
             self.command("fragment texture", unsafe {

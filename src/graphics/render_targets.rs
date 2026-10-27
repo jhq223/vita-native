@@ -21,27 +21,45 @@ fn index(size: [u32; 2]) -> usize {
 
 pub(super) struct Pool<T> {
     slots: [Weak<T>; CLASSES],
+    retained: super::retained::Retained<T>,
 }
 impl<T> Default for Pool<T> {
     fn default() -> Self {
-        Self {
-            slots: std::array::from_fn(|_| Weak::new()),
-        }
+        Self::new(0)
     }
 }
 impl<T> Pool<T> {
+    pub fn new(retained_bytes: u64) -> Self {
+        Self {
+            slots: std::array::from_fn(|_| Weak::new()),
+            retained: super::retained::Retained::new(retained_bytes),
+        }
+    }
+    pub fn contains(&self, size: [u32; 2]) -> Result<bool> {
+        Ok(self.slots[index(extent(size)?)].strong_count() != 0)
+    }
+    pub fn release_idle(&mut self) {
+        self.retained.release_idle();
+    }
+    pub fn clear(&mut self) {
+        self.retained.clear();
+    }
+
     pub fn get_or_create(
         &mut self,
         size: [u32; 2],
+        bytes: u64,
         create: impl FnOnce([u32; 2]) -> Result<Rc<T>>,
     ) -> Result<Rc<T>> {
         let size = extent(size)?;
         let slot = &mut self.slots[index(size)];
         if let Some(target) = slot.upgrade() {
+            self.retained.touch(&target, bytes);
             return Ok(target);
         }
         let target = create(size)?;
         *slot = Rc::downgrade(&target);
+        self.retained.touch(&target, bytes);
         Ok(target)
     }
 
@@ -70,6 +88,15 @@ impl RenderTarget {
         sdk("sceGxmGetRenderTargetMemSize", unsafe {
             sceGxmGetRenderTargetMemSize(&params, &mut bytes)
         })?;
+        let capacity = u64::from(bytes).next_multiple_of(4096);
+        let requested = owner.rt_bytes.get().saturating_add(capacity);
+        if requested > owner.config.render_target_bytes {
+            return Err(super::Error::Budget {
+                domain: "native scheduling targets",
+                requested,
+                limit: owner.config.render_target_bytes,
+            });
+        }
         let driver = Block::new(bytes as usize, Kind::Driver, &owner.fault)?;
         params.driverMemBlock = driver.uid;
         let mut raw = core::ptr::null_mut();
@@ -145,34 +172,66 @@ mod tests {
             creates.set(creates.get() + 1);
             Ok(Rc::new(extent))
         };
-        let first = pool.get_or_create([960, 544], create).unwrap();
-        let second = pool.get_or_create([1024, 700], create).unwrap();
+        let first = pool.get_or_create([960, 544], 4096, create).unwrap();
+        let second = pool.get_or_create([1024, 700], 4096, create).unwrap();
         assert!(Rc::ptr_eq(&first, &second));
         assert_eq!(creates.get(), 1);
         let submission = first.clone();
         drop((first, second));
         assert_eq!(pool.live_count(), 1);
-        let third = pool.get_or_create([900, 600], create).unwrap();
+        let third = pool.get_or_create([900, 600], 4096, create).unwrap();
         assert!(Rc::ptr_eq(&submission, &third));
         drop((submission, third));
         assert_eq!(pool.live_count(), 0);
-        let next = pool.get_or_create([960, 544], create).unwrap();
+        let next = pool.get_or_create([960, 544], 4096, create).unwrap();
         assert_eq!(creates.get(), 2);
         assert_eq!(*next, [1024, 1024]);
+    }
+
+    #[test]
+    fn alternating_dimensions_reuse_bounded_targets_after_surfaces_retire() {
+        let mut pool = Pool::new(8192);
+        let creates = Cell::new(0);
+        for _ in 0..1000 {
+            for size in [[128, 128], [256, 256]] {
+                drop(
+                    pool.get_or_create(size, 4096, |extent| {
+                        creates.set(creates.get() + 1);
+                        Ok(Rc::new(extent))
+                    })
+                    .unwrap(),
+                );
+            }
+        }
+        assert_eq!(creates.get(), 2);
+        assert_eq!(pool.retained.bytes(), 8192);
+        assert!(pool.contains([128, 128]).unwrap());
+        let flight = pool
+            .get_or_create([128, 128], 4096, |_| unreachable!())
+            .unwrap();
+        pool.release_idle();
+        assert_eq!(pool.live_count(), 1);
+        pool.clear();
+        assert_eq!(*flight, [128, 128]);
+        drop(flight);
+        assert_eq!(pool.live_count(), 0);
+        eprintln!(
+            "target retention: 2000 requests, 2 creations, 8192 retained bytes; baseline 2000 creations"
+        );
     }
 
     #[test]
     fn failed_creation_leaves_the_class_available() {
         let mut pool = Pool::<[u32; 2]>::default();
         assert!(
-            pool.get_or_create([960, 544], |_| Err(super::super::Error::Invalid(
+            pool.get_or_create([960, 544], 4096, |_| Err(super::super::Error::Invalid(
                 "creation"
             )))
             .is_err()
         );
         assert_eq!(pool.live_count(), 0);
         let target = pool
-            .get_or_create([960, 544], |size| Ok(Rc::new(size)))
+            .get_or_create([960, 544], 4096, |size| Ok(Rc::new(size)))
             .unwrap();
         assert_eq!(pool.live_count(), 1);
         assert_eq!(*target, [1024, 1024]);

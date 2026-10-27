@@ -51,6 +51,8 @@ pub(super) struct ProgramInner {
     pub vertex: [*mut SceGxmVertexProgram; 2],
     pub fragment: [*mut SceGxmFragmentProgram; 2],
     pub clip: Option<*const SceGxmProgramParameter>,
+    pub uniform_sizes: [u32; 2],
+    pub texture_slots: usize,
     pub stride: u32,
     pub attributes: Vec<VertexAttribute>,
     pub owner: Rc<Core>,
@@ -110,16 +112,6 @@ pub(super) struct Parameter {
 pub struct Uniform {
     pub(super) program: Program,
     pub(super) parameters: Vec<Parameter>,
-}
-impl ProgramInner {
-    pub(super) fn uniform_sizes(&self) -> [u32; 2] {
-        unsafe {
-            [
-                sceGxmProgramGetDefaultUniformBufferSize(self.vertex_code.ptr()),
-                sceGxmProgramGetDefaultUniformBufferSize(self.fragment_code.ptr()),
-            ]
-        }
-    }
 }
 impl Program {
     /// Reflect a numeric/default-buffer or fixed TEXUNIT binding once; `[0]` names normalize.
@@ -281,7 +273,26 @@ impl Context {
         } else {
             None
         };
+        let uniform_sizes = unsafe {
+            [
+                sceGxmProgramGetDefaultUniformBufferSize(v.ptr()),
+                sceGxmProgramGetDefaultUniformBufferSize(f.ptr()),
+            ]
+        };
+        let texture_slots = (0..unsafe { sceGxmProgramGetParameterCount(f.ptr()) })
+            .filter_map(|index| unsafe {
+                let parameter = sceGxmProgramGetParameter(f.ptr(), index);
+                (sceGxmProgramParameterGetCategory(parameter) == SCE_GXM_PARAMETER_CATEGORY_SAMPLER)
+                    .then(|| {
+                        sceGxmProgramParameterGetResourceIndex(parameter) as usize
+                            + sceGxmProgramParameterGetArraySize(parameter) as usize
+                    })
+            })
+            .max()
+            .unwrap_or(0);
         let mut inner = ProgramInner {
+            uniform_sizes,
+            texture_slots,
             vertex_code: v,
             fragment_code: f,
             vertex_id: core::ptr::null_mut(),

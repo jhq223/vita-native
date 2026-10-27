@@ -25,16 +25,15 @@ impl FreeList {
         Some(start..start + bytes)
     }
     pub fn release(&mut self, range: Range<usize>) {
-        let i = self.ranges.partition_point(|r| r.start < range.start);
+        let mut i = self.ranges.partition_point(|r| r.start < range.start);
         self.ranges.insert(i, range);
-        let mut i = i.saturating_sub(1);
-        while i + 1 < self.ranges.len() {
-            if self.ranges[i].end == self.ranges[i + 1].start {
-                let end = self.ranges.remove(i + 1).end;
-                self.ranges[i].end = end;
-            } else {
-                i += 1;
-            }
+        if i > 0 && self.ranges[i - 1].end == self.ranges[i].start {
+            let end = self.ranges.remove(i).end;
+            i -= 1;
+            self.ranges[i].end = end;
+        }
+        if i + 1 < self.ranges.len() && self.ranges[i].end == self.ranges[i + 1].start {
+            self.ranges[i].end = self.ranges.remove(i + 1).end;
         }
     }
     pub fn bytes(&self) -> usize {

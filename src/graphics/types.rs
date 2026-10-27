@@ -83,6 +83,14 @@ pub struct Config {
     pub pixel_arena_bytes: u64,
     /// Reserved uncached LPDDR cap for geometry and upload staging; default 16 MiB.
     pub buffer_arena_bytes: u64,
+    /// Strongly retained pixel block capacity, included in pixel_arena_bytes.
+    pub pixel_retained_bytes: u64,
+    /// Strongly retained buffer block capacity, included in buffer_arena_bytes.
+    pub buffer_retained_bytes: u64,
+    /// Total firmware scheduling block capacity, including active and retained targets.
+    pub render_target_bytes: u64,
+    /// Strongly retained scheduling capacity within render_target_bytes.
+    pub render_target_retained_bytes: u64,
     /// Maximum simultaneously owned transfer staging; admission waits real completion at this cap.
     pub upload_staging_bytes: u64,
     /// libgxm-owned CDRAM parameter-buffer size; default 16 MiB.
@@ -109,6 +117,10 @@ impl Default for Config {
         Self {
             pixel_arena_bytes: 96 * 1024 * 1024,
             buffer_arena_bytes: 16 * 1024 * 1024,
+            pixel_retained_bytes: 8 * 1024 * 1024,
+            buffer_retained_bytes: 1024 * 1024,
+            render_target_bytes: 16 * 1024 * 1024,
+            render_target_retained_bytes: 4 * 1024 * 1024,
             upload_staging_bytes: 4 * 1024 * 1024,
             parameter_bytes: 16 * 1024 * 1024,
             vdm_ring_bytes: 128 * 1024,
@@ -131,6 +143,10 @@ pub struct ArenaUsage {
     pub used_bytes: u64,
     /// Live kernel blocks in this arena.
     pub blocks: u32,
+    /// Completely idle capacity retained for reuse, included in reserved_bytes.
+    pub idle_bytes: u64,
+    /// Successful kernel block allocations since device creation.
+    pub block_allocations: u64,
 }
 /// Independent native memory domains. Renderer tickets describe their own payloads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -149,6 +165,9 @@ pub struct MemoryUsage {
     pub patcher_host_bytes: u64,
     /// Actual uncached kernel block capacity backing all live render targets.
     pub render_target_driver_bytes: u64,
+    /// Read-only media capacity mapped for sampling. Its physical budget belongs
+    /// to the producer's frame pool; this is an alias count, not extra storage.
+    pub imported_video_bytes: u64,
     /// Live shared firmware targets; scheduling size classes bound this count to 36.
     pub render_targets: u32,
     /// Scanout payload bytes; a subset of display_reserved_bytes.
@@ -161,7 +180,7 @@ pub struct MemoryUsage {
     pub scene_submissions: u64,
     /// Admission waits caused by exhausting the 256 completion slots.
     pub notification_capacity_waits: u64,
-    /// Admission waits at the two-entry display queue limit.
+    /// Submissions observed at display capacity before native queue admission.
     pub display_queue_waits: u64,
     /// Successfully completed display callbacks.
     pub display_flips: u64,

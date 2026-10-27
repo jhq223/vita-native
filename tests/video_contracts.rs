@@ -11,6 +11,8 @@ pub use info::Info;
 mod input;
 #[path = "../src/video/metadata.rs"]
 mod metadata;
+#[path = "../src/video/pcm.rs"]
+mod pcm;
 #[path = "../src/video/timing.rs"]
 mod timing;
 use std::{
@@ -145,6 +147,24 @@ fn movie(width: u16, height: u16) -> Vec<u8> {
 }
 
 #[test]
+fn aac_frame_length_flag_selects_960_samples() {
+    let mut data = movie(960, 540);
+    let config = data
+        .windows(4)
+        .position(|bytes| bytes == [5, 2, 0x12, 0x08])
+        .unwrap();
+    data[config + 3] |= 4;
+    let parsed = metadata::read(
+        &mut Cursor::new(&data),
+        data.len() as u64,
+        &AtomicBool::new(false),
+        &budget(65535),
+    )
+    .unwrap();
+    assert_eq!(parsed.audio_frame_samples, 960);
+}
+
+#[test]
 fn scalar_metadata_keeps_visible_size_timeline_and_aac_channels_with_exact_sps_ownership() {
     let data = movie(960, 540);
     let ledger = budget(65535);
@@ -159,6 +179,7 @@ fn scalar_metadata_keeps_visible_size_timeline_and_aac_channels_with_exact_sps_o
         info,
         sps,
         sps_storage,
+        audio_frame_samples,
     } = parsed;
     assert_eq!((info.width, info.height), (960, 540));
     assert_eq!(info.duration, 1.);
@@ -166,6 +187,7 @@ fn scalar_metadata_keeps_visible_size_timeline_and_aac_channels_with_exact_sps_o
     assert!((info.final_picture_time - 29. / 30.).abs() < 1e-12);
     assert_eq!(info.audio_sample_rate, Some(44100));
     assert_eq!(info.audio_channels, 1);
+    assert_eq!(audio_frame_samples, 1024);
     assert_eq!(sps, [0x67, 0x42, 0, 0x1e]);
     assert_eq!(ledger.live.load(Ordering::Relaxed), sps.capacity());
     drop(sps);
