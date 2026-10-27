@@ -73,9 +73,6 @@ cargo test --all-features
 cargo fmt --all -- --check
 ```
 
-## Source
+## License
 
-The initial native services were developed in
-[`pvr-psp2-sys`](https://github.com/jhq223/pvr-psp2-sys/tree/ff4d6f3e59ef5d708b606fbcef57f84f8c2f79b2/src)
-and are maintained here with explicit application-provided graphics interfaces.
-VitaSDK declarations remain a pinned dependency. This crate is licensed under MIT.
+[MIT](LICENSE).

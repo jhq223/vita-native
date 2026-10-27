@@ -70,9 +70,6 @@ cargo test --all-features
 cargo fmt --all -- --check
 ```
 
-## 来源
+## 许可证
 
-原生服务最初开发于
-[`pvr-psp2-sys`](https://github.com/jhq223/pvr-psp2-sys/tree/ff4d6f3e59ef5d708b606fbcef57f84f8c2f79b2/src)，
-现于本库维护，图形程序接口由应用明确提供。
-VitaSDK 声明通过固定版本的依赖使用。本库采用 MIT 许可证。
+[MIT](LICENSE)。
