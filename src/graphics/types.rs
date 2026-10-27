@@ -83,6 +83,14 @@ pub struct Config {
     pub pixel_arena_bytes: u64,
     /// Reserved uncached LPDDR cap for geometry and upload staging; default 16 MiB.
     pub buffer_arena_bytes: u64,
+    /// Strongly retained pixel block capacity, included in pixel_arena_bytes.
+    pub pixel_retained_bytes: u64,
+    /// Strongly retained buffer block capacity, included in buffer_arena_bytes.
+    pub buffer_retained_bytes: u64,
+    /// Total firmware scheduling block capacity, including active and retained targets.
+    pub render_target_bytes: u64,
+    /// Strongly retained scheduling capacity within render_target_bytes.
+    pub render_target_retained_bytes: u64,
     /// Maximum simultaneously owned transfer staging; admission waits real completion at this cap.
     pub upload_staging_bytes: u64,
     /// libgxm-owned CDRAM parameter-buffer size; default 16 MiB.
@@ -109,6 +117,10 @@ impl Default for Config {
         Self {
             pixel_arena_bytes: 96 * 1024 * 1024,
             buffer_arena_bytes: 16 * 1024 * 1024,
+            pixel_retained_bytes: 8 * 1024 * 1024,
+            buffer_retained_bytes: 1024 * 1024,
+            render_target_bytes: 16 * 1024 * 1024,
+            render_target_retained_bytes: 4 * 1024 * 1024,
             upload_staging_bytes: 4 * 1024 * 1024,
             parameter_bytes: 16 * 1024 * 1024,
             vdm_ring_bytes: 128 * 1024,

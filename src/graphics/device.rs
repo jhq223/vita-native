@@ -366,9 +366,19 @@ impl Context {
         let native = Native::new(config, &fault)?;
         let core = Rc::new(Core {
             native,
-            pixels: Arena::new(Kind::Cdram, &fault, config.pixel_arena_bytes),
-            display_pixels: Arena::new(Kind::Cdram, &fault, 8 * 1024 * 1024),
-            buffers: Arena::new(Kind::Uncached, &fault, config.buffer_arena_bytes),
+            pixels: Arena::new(
+                Kind::Cdram,
+                &fault,
+                config.pixel_arena_bytes,
+                config.pixel_retained_bytes,
+            ),
+            display_pixels: Arena::new(Kind::Cdram, &fault, 8 * 1024 * 1024, 0),
+            buffers: Arena::new(
+                Kind::Uncached,
+                &fault,
+                config.buffer_arena_bytes,
+                config.buffer_retained_bytes,
+            ),
             fault,
             config,
             caps: Capabilities {
@@ -400,7 +410,11 @@ impl Context {
                 display_waits: 0,
             }),
             screens: RefCell::new(Vec::new()),
-            targets: RefCell::new(super::render_targets::Pool::default()),
+            targets: RefCell::new(super::render_targets::Pool::new(
+                config
+                    .render_target_retained_bytes
+                    .min(config.render_target_bytes),
+            )),
             vsync: Cell::new(vsync),
             clear: RefCell::new(None),
             bound_program: RefCell::new(None),
@@ -786,6 +800,7 @@ impl Context {
         let inner = Rc::get_mut(&mut self.0).expect("unique context");
         inner.clear.get_mut().take();
         inner.screens.get_mut().clear();
+        inner.targets.get_mut().clear();
         inner.identity.get_mut().take();
         inner.state.get_mut().last = None;
         let core = Rc::get_mut(&mut inner.core).expect("all external device owners released");

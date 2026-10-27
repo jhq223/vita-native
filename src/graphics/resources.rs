@@ -487,11 +487,21 @@ impl Context {
             TextureFormat::Bgra8 => SCE_GXM_COLOR_FORMAT_A8R8G8B8,
             _ => return Err(Error::Unsupported("framebuffer color format")),
         };
-        let target = self
-            .0
-            .targets
-            .borrow_mut()
-            .get_or_create(t.size(), |size| RenderTarget::new(&self.0.core, size))?;
+        let bytes = self
+            .target_footprint(t.size())?
+            .render_target_driver_bytes
+            .unwrap();
+        let mut pool = self.0.targets.borrow_mut();
+        if !pool.contains(t.size())?
+            && self.0.core.rt_bytes.get().saturating_add(bytes)
+                > self.0.core.config.render_target_bytes
+        {
+            pool.release_idle();
+        }
+        let target = pool.get_or_create(t.size(), bytes, |size| {
+            RenderTarget::new(&self.0.core, size)
+        })?;
+        drop(pool);
         let mut sync = core::ptr::null_mut();
         let mut surface = unsafe { core::mem::zeroed() };
         let outcome = (|| {

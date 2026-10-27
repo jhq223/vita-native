@@ -188,13 +188,13 @@ pub(super) struct Arena {
     kind: Kind,
     quantum: usize,
     blocks: RefCell<Vec<Weak<Block>>>,
-    warm: RefCell<Option<Rc<Block>>>,
+    warm: RefCell<super::retained::Retained<Block>>,
     block_allocations: Cell<u64>,
     fault: Fault,
     limit: u64,
 }
 impl Arena {
-    pub fn new(kind: Kind, fault: &Fault, limit: u64) -> Self {
+    pub fn new(kind: Kind, fault: &Fault, limit: u64, retained: u64) -> Self {
         Self {
             kind,
             quantum: if kind == Kind::Cdram {
@@ -203,7 +203,7 @@ impl Arena {
                 64 * 1024
             },
             blocks: RefCell::new(Vec::new()),
-            warm: RefCell::new(None),
+            warm: RefCell::new(super::retained::Retained::new(retained.min(limit))),
             block_allocations: Cell::new(0),
             fault: fault.clone(),
             limit,
@@ -218,19 +218,10 @@ impl Arena {
         blocks.retain(|b| b.strong_count() > 0);
         for block in blocks.iter().filter_map(Weak::upgrade) {
             if let Some(a) = block.allocate(bytes, alignment) {
+                self.warm.borrow_mut().touch(&block, block.bytes as u64);
                 return Ok(a);
             }
         }
-        // One quantum-sized block stays mapped for recurring small uploads/geometry.
-        // Evict it before a new block request if it is idle and could not serve this layout.
-        self.release_idle();
-        self.fault.check()?;
-        blocks.retain(|b| b.strong_count() > 0);
-        let used: u64 = blocks
-            .iter()
-            .filter_map(Weak::upgrade)
-            .map(|b| b.bytes as u64)
-            .sum();
         let block_bytes = bytes
             .max(self.quantum)
             .next_multiple_of(if self.kind == Kind::Cdram {
@@ -238,6 +229,18 @@ impl Arena {
             } else {
                 4096
             });
+        let capacity = || {
+            blocks
+                .iter()
+                .filter_map(Weak::upgrade)
+                .map(|b| b.bytes as u64)
+                .sum::<u64>()
+        };
+        if capacity().saturating_add(block_bytes as u64) > self.limit {
+            self.release_idle();
+            self.fault.check()?;
+        }
+        let used = capacity();
         if used + block_bytes as u64 > self.limit {
             return Err(Error::Budget {
                 domain: if self.kind == Kind::Cdram {
@@ -253,16 +256,11 @@ impl Arena {
         let allocation = block.allocate(bytes, alignment).expect("new aligned block");
         blocks.push(Rc::downgrade(&block));
         self.block_allocations.set(self.block_allocations.get() + 1);
-        if block.bytes <= self.quantum {
-            *self.warm.borrow_mut() = Some(block);
-        }
+        self.warm.borrow_mut().touch(&block, block.bytes as u64);
         Ok(allocation)
     }
     pub fn release_idle(&self) {
-        let mut warm = self.warm.borrow_mut();
-        if warm.as_ref().is_some_and(|b| Rc::strong_count(b) == 1) {
-            warm.take();
-        }
+        self.warm.borrow_mut().release_idle();
     }
     pub fn usage(&self) -> ArenaUsage {
         let mut u = ArenaUsage {
