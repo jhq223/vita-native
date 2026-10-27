@@ -37,8 +37,13 @@ programs and binding names. Programs are prepared once and reused by draws.
 
 Textures and buffers own mapped allocations. Scene submissions retain their inputs
 until fragment completion, and display scanout retains its output independently.
+Bound programs remain owned until replaced or unbound. Presentation uses three
+scanout buffers and native queue admission; resource updates wait for their own users.
 Compatible color surfaces share bounded firmware scheduling targets. Configured
 budgets account for kernel capacity, live payload and infrastructure separately.
+Each arena retains at most one small mapped block for reuse within its budget:
+256 KiB for pixels and 64 KiB for buffers. An idle block is released before an
+allocation that needs different storage.
 
 ## Ownership and threads
 

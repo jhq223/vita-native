@@ -239,23 +239,21 @@ impl Context {
         self.allocate_texture(size, TextureFormat::Rgba8, true, true)
     }
     /// Reorder row-major BC blocks directly into final mapped Morton storage.
-    /// The staging argument is retained for the shared adapter and may be empty.
     pub fn create_bc_texture(
         &self,
         size: [u32; 2],
         format: TextureFormat,
         blocks: &[u8],
-        _staging: &mut [u8],
     ) -> Result<Texture> {
         if !format.compressed() {
             return Err(Error::Invalid("BC format"));
         }
         let texture = self.create_texture(size, format)?;
-        self.upload_bc_texture(&texture, blocks, &mut [])?;
+        self.upload_bc_texture(&texture, blocks)?;
         Ok(texture)
     }
-    /// Replace BC payload after its readers complete; busy data uses an owned ordered transfer.
-    pub fn upload_bc_texture(&self, t: &Texture, blocks: &[u8], _staging: &mut [u8]) -> Result<()> {
+    /// Wait for this texture's users, then reorder BC blocks into its mapped storage.
+    pub fn upload_bc_texture(&self, t: &Texture, blocks: &[u8]) -> Result<()> {
         self.same(&t.0.owner)?;
         if !t.0.format.compressed() || blocks.len() != t.0.layout.bytes {
             return Err(Error::Invalid("BC payload"));
@@ -700,7 +698,7 @@ impl Context {
         b.maximum = maximum;
         Ok(())
     }
-    /// Production capture only: complete submitted work and copy top-left visible RGBA rows.
+    /// Capture top-left visible RGBA rows after this target's users complete.
     pub fn read_rgba(&self, target: &Framebuffer, output: &mut [u8]) -> Result<()> {
         self.same(&target.0.owner)?;
         if target.texture().format() != TextureFormat::Rgba8
@@ -708,8 +706,8 @@ impl Context {
         {
             return Err(Error::Invalid("capture extent"));
         }
-        self.finish()?;
         let t = &target.0.texture;
+        self.await_allocation(&t.0.allocation)?;
         let row = target.size()[0] as usize * 4;
         for (y, dest) in output.chunks_exact_mut(row).enumerate() {
             let source = unsafe {

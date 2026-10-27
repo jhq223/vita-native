@@ -2,7 +2,7 @@
 use super::suballoc::FreeList;
 use super::{ArenaUsage, DeviceFault, Error, types::Result};
 use std::{
-    cell::{OnceCell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     ffi::c_void,
     ops::Range,
     prelude::v1::*,
@@ -188,6 +188,8 @@ pub(super) struct Arena {
     kind: Kind,
     quantum: usize,
     blocks: RefCell<Vec<Weak<Block>>>,
+    warm: RefCell<Option<Rc<Block>>>,
+    block_allocations: Cell<u64>,
     fault: Fault,
     limit: u64,
 }
@@ -201,6 +203,8 @@ impl Arena {
                 64 * 1024
             },
             blocks: RefCell::new(Vec::new()),
+            warm: RefCell::new(None),
+            block_allocations: Cell::new(0),
             fault: fault.clone(),
             limit,
         }
@@ -217,6 +221,11 @@ impl Arena {
                 return Ok(a);
             }
         }
+        // One quantum-sized block stays mapped for recurring small uploads/geometry.
+        // Evict it before a new block request if it is idle and could not serve this layout.
+        self.release_idle();
+        self.fault.check()?;
+        blocks.retain(|b| b.strong_count() > 0);
         let used: u64 = blocks
             .iter()
             .filter_map(Weak::upgrade)
@@ -243,14 +252,31 @@ impl Arena {
         let block = Block::new(block_bytes, self.kind, &self.fault)?;
         let allocation = block.allocate(bytes, alignment).expect("new aligned block");
         blocks.push(Rc::downgrade(&block));
+        self.block_allocations.set(self.block_allocations.get() + 1);
+        if block.bytes <= self.quantum {
+            *self.warm.borrow_mut() = Some(block);
+        }
         Ok(allocation)
     }
+    pub fn release_idle(&self) {
+        let mut warm = self.warm.borrow_mut();
+        if warm.as_ref().is_some_and(|b| Rc::strong_count(b) == 1) {
+            warm.take();
+        }
+    }
     pub fn usage(&self) -> ArenaUsage {
-        let mut u = ArenaUsage::default();
+        let mut u = ArenaUsage {
+            block_allocations: self.block_allocations.get(),
+            ..ArenaUsage::default()
+        };
         for b in self.blocks.borrow().iter().filter_map(Weak::upgrade) {
             u.blocks += 1;
             u.reserved_bytes += b.bytes as u64;
-            u.used_bytes += (b.bytes - b.free.borrow().bytes()) as u64;
+            let used = b.bytes - b.free.borrow().bytes();
+            u.used_bytes += used as u64;
+            if used == 0 {
+                u.idle_bytes += b.bytes as u64;
+            }
         }
         u
     }

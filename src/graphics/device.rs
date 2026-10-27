@@ -178,9 +178,6 @@ impl Native {
         })?;
         Ok(n)
     }
-    pub(super) fn display_completed(&self) -> u32 {
-        self.display.completed.load(Ordering::Acquire)
-    }
     fn close(&mut self) -> Result<()> {
         self.fault.check()?;
         if self.closed {
@@ -223,10 +220,10 @@ impl Drop for Native {
     }
 }
 pub(super) struct Core {
-    pub native: Native,
     pub pixels: Arena,
     pub display_pixels: Arena,
     pub buffers: Arena,
+    pub native: Native,
     pub fault: Fault,
     pub config: Config,
     pub caps: Capabilities,
@@ -238,6 +235,9 @@ pub(super) enum Lease {
     Target(Framebuffer),
 }
 impl Lease {
+    fn uses(&self, allocation: &Allocation) -> bool {
+        matches!(self, Self::Allocation(a) if a.id() == allocation.id())
+    }
     fn key(&self) -> usize {
         match self {
             Self::Allocation(a) => a.id(),
@@ -286,6 +286,10 @@ pub(super) struct State {
     pub slot_waits: u64,
     pub display_waits: u64,
 }
+pub(super) struct BoundProgram {
+    pub program: Program,
+    pub variants: [usize; 2],
+}
 pub(super) struct Clear {
     pub program: Program,
     pub vertices: VertexBuffer,
@@ -298,6 +302,7 @@ pub(super) struct Inner {
     pub targets: RefCell<super::render_targets::Pool<super::render_targets::RenderTarget>>,
     pub vsync: Cell<bool>,
     pub clear: RefCell<Option<Clear>>,
+    pub bound_program: RefCell<Option<BoundProgram>>,
     pub display_detached: Cell<bool>,
     pub identity: RefCell<Option<Allocation>>,
 }
@@ -398,6 +403,7 @@ impl Context {
             targets: RefCell::new(super::render_targets::Pool::default()),
             vsync: Cell::new(vsync),
             clear: RefCell::new(None),
+            bound_program: RefCell::new(None),
             display_detached: Cell::new(false),
             identity: RefCell::new(None),
         }));
@@ -567,7 +573,13 @@ impl Context {
     }
     pub(super) fn await_allocation(&self, allocation: &Allocation) -> Result<()> {
         let mut s = self.0.state.borrow_mut();
-        self.end_scene(&mut s)?;
+        self.check("resource wait")?;
+        if s.recording
+            .as_ref()
+            .is_some_and(|r| r.leases.iter().any(|l| l.uses(allocation)))
+        {
+            self.end_scene(&mut s)?;
+        }
         while allocation.used() {
             self.poll_state(&mut s)?;
             if !allocation.used() {
@@ -575,7 +587,8 @@ impl Context {
             }
             let token = &s
                 .flights
-                .front()
+                .iter()
+                .find(|f| f.token.leases.borrow().iter().any(|l| l.uses(allocation)))
                 .ok_or(Error::Invalid("allocation has an external native lease"))?
                 .token;
             self.command("sceGxmNotificationWait(resource replacement)", unsafe {
@@ -689,9 +702,6 @@ impl Context {
         let completed = self.0.core.native.display.completed.load(Ordering::Acquire);
         if s.presents.wrapping_sub(completed) >= DISPLAY_PENDING {
             s.display_waits += 1;
-            self.command("sceGxmDisplayQueueFinish(admission)", unsafe {
-                sceGxmDisplayQueueFinish()
-            })?;
         }
         let serial = s
             .presents
@@ -716,7 +726,7 @@ impl Context {
         s.presents = serial;
         s.last_presented = s.screen;
         s.screen = (s.screen + 1) % screens.len();
-        Ok(())
+        self.check("present completion")
     }
     /// Native allocator and command counters, separate from renderer payload tickets.
     pub fn memory_usage(&self) -> Result<MemoryUsage> {
@@ -762,6 +772,7 @@ impl Context {
         if Rc::strong_count(&self.0) != 1 {
             return Err((self, Error::Invalid("context clones still alive")));
         }
+        self.0.unbind_program();
         let internal = 1
             + self.0.screens.borrow().len() * 2
             + self.0.targets.borrow().live_count()
@@ -778,6 +789,9 @@ impl Context {
         inner.identity.get_mut().take();
         inner.state.get_mut().last = None;
         let core = Rc::get_mut(&mut inner.core).expect("all external device owners released");
+        core.pixels.release_idle();
+        core.display_pixels.release_idle();
+        core.buffers.release_idle();
         if let Err(e) = core.native.close() {
             return Err((self, e));
         }
@@ -785,6 +799,22 @@ impl Context {
     }
 }
 impl Inner {
+    fn retain_faulted_work(&mut self) {
+        if let Some(r) = self.state.get_mut().recording.take() {
+            core::mem::forget(r);
+        }
+        core::mem::forget(core::mem::take(&mut self.state.get_mut().flights));
+        core::mem::forget(core::mem::take(self.screens.get_mut()));
+        core::mem::forget(self.clear.get_mut().take());
+        core::mem::forget(self.bound_program.get_mut().take());
+    }
+    fn unbind_program(&self) {
+        unsafe {
+            sceGxmSetVertexProgram(self.core.native.context, core::ptr::null_mut());
+            sceGxmSetFragmentProgram(self.core.native.context, core::ptr::null_mut());
+        }
+        self.bound_program.borrow_mut().take();
+    }
     fn detach_display(&self) -> Result<()> {
         if self.display_detached.get() {
             return Ok(());
@@ -813,12 +843,7 @@ impl Drop for Inner {
             self.core.fault.record("display callback", callback_error);
         }
         if self.core.fault.get().is_some() {
-            if let Some(r) = self.state.get_mut().recording.take() {
-                core::mem::forget(r);
-            }
-            core::mem::forget(core::mem::take(&mut self.state.get_mut().flights));
-            core::mem::forget(core::mem::take(self.screens.get_mut()));
-            core::mem::forget(self.clear.get_mut().take());
+            self.retain_faulted_work();
             return;
         }
         // Drop is a final explicit ownership boundary, never a per-pass barrier.
@@ -862,10 +887,17 @@ impl Drop for Inner {
         {
             return;
         }
+        let callback_error = self.core.native.display.error.load(Ordering::Acquire);
+        if callback_error < 0 {
+            self.core.fault.record("display callback", callback_error);
+            self.retain_faulted_work();
+            return;
+        }
         // Display Reference pp9-10,17: NULL selects black; transitions require NEXTVSYNC.
         if self.detach_display().is_err() {
             return;
         }
+        self.unbind_program();
         for f in &self.state.get_mut().flights {
             f.token.poll();
         }

@@ -131,6 +131,10 @@ pub struct ArenaUsage {
     pub used_bytes: u64,
     /// Live kernel blocks in this arena.
     pub blocks: u32,
+    /// Completely idle capacity retained for reuse, included in reserved_bytes.
+    pub idle_bytes: u64,
+    /// Successful kernel block allocations since device creation.
+    pub block_allocations: u64,
 }
 /// Independent native memory domains. Renderer tickets describe their own payloads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -161,7 +165,7 @@ pub struct MemoryUsage {
     pub scene_submissions: u64,
     /// Admission waits caused by exhausting the 256 completion slots.
     pub notification_capacity_waits: u64,
-    /// Admission waits at the two-entry display queue limit.
+    /// Submissions observed at display capacity before native queue admission.
     pub display_queue_waits: u64,
     /// Successfully completed display callbacks.
     pub display_flips: u64,
