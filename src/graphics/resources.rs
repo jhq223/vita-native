@@ -273,6 +273,18 @@ impl Context {
             dst,
         )
     }
+    /// Copy offline GXM Morton BC blocks directly into mapped texture storage.
+    /// Input must have the physical power-of-two extent reported by texture_layout.
+    /// Waits only for this allocation's submitted users before overwriting it.
+    pub fn upload_bc_morton_texture(&self, t: &Texture, blocks: &[u8]) -> Result<()> {
+        self.same(&t.0.owner)?;
+        if !t.0.format.compressed() || blocks.len() != t.0.layout.bytes {
+            return Err(Error::Invalid("Morton BC payload"));
+        }
+        self.await_allocation(&t.0.allocation)?;
+        t.0.allocation.write(0, blocks);
+        Ok(())
+    }
     /// Consume CPU rows before returning. In-flight textures use staged GPU copies,
     /// ordered between fragment scenes and retired by a transfer notification.
     pub fn upload(
