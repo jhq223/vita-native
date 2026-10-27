@@ -102,7 +102,7 @@ pub struct IndexBuffer {
     pub(super) maximum: u32,
     pub(super) owner: Rc<Core>,
 }
-fn texture_format(f: TextureFormat) -> u32 {
+pub(super) fn texture_format(f: TextureFormat) -> u32 {
     match f {
         TextureFormat::Rgba8 => SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,
         TextureFormat::Bgra8 => SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ARGB,
@@ -300,6 +300,7 @@ impl Context {
         let bpp = t.format().pixel_bytes();
         let row = size[0] as usize * bpp;
         if size.contains(&0)
+            || !t.0.allocation.writable()
             || t.format().compressed()
             || stride < row
             || data.len() < (size[1] as usize - 1) * stride + row

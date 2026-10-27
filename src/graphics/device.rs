@@ -228,6 +228,7 @@ pub(super) struct Core {
     pub config: Config,
     pub caps: Capabilities,
     pub rt_bytes: Cell<u64>,
+    pub imported_video_bytes: Rc<Cell<u64>>,
 }
 pub(super) enum Lease {
     Allocation(Allocation),
@@ -300,6 +301,8 @@ pub(super) struct Inner {
     pub state: RefCell<State>,
     pub screens: RefCell<Vec<Framebuffer>>,
     pub targets: RefCell<super::render_targets::Pool<super::render_targets::RenderTarget>>,
+    #[cfg(feature = "video")]
+    pub video_imports: RefCell<Vec<std::rc::Weak<super::video::Import>>>,
     pub vsync: Cell<bool>,
     pub clear: RefCell<Option<Clear>>,
     pub bound_program: RefCell<Option<BoundProgram>>,
@@ -393,6 +396,7 @@ impl Context {
                 completion: CompletionMode::FragmentNotification,
             },
             rt_bytes: Cell::new(0),
+            imported_video_bytes: Rc::new(Cell::new(0)),
         });
         let context = Self(Rc::new(Inner {
             core,
@@ -410,6 +414,8 @@ impl Context {
                 display_waits: 0,
             }),
             screens: RefCell::new(Vec::new()),
+            #[cfg(feature = "video")]
+            video_imports: RefCell::new(Vec::new()),
             targets: RefCell::new(super::render_targets::Pool::new(
                 config
                     .render_target_retained_bytes
@@ -757,6 +763,7 @@ impl Context {
             patcher_pool_bytes: n.blocks.iter().skip(4).map(|b| b.bytes as u64).sum(),
             patcher_host_bytes: unsafe { sceGxmShaderPatcherGetHostMemAllocated(n.patcher) }.into(),
             render_target_driver_bytes: self.0.core.rt_bytes.get(),
+            imported_video_bytes: self.0.core.imported_video_bytes.get(),
             render_targets: self.0.targets.borrow().live_count() as u32,
             display_reserved_bytes: self.0.core.display_pixels.usage().reserved_bytes,
             display_pixel_bytes: self

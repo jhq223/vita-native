@@ -165,6 +165,9 @@ pub struct MemoryUsage {
     pub patcher_host_bytes: u64,
     /// Actual uncached kernel block capacity backing all live render targets.
     pub render_target_driver_bytes: u64,
+    /// Read-only media capacity mapped for sampling. Its physical budget belongs
+    /// to the producer's frame pool; this is an alias count, not extra storage.
+    pub imported_video_bytes: u64,
     /// Live shared firmware targets; scheduling size classes bound this count to 36.
     pub render_targets: u32,
     /// Scanout payload bytes; a subset of display_reserved_bytes.

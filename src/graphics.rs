@@ -29,6 +29,8 @@ mod memory;
 mod program;
 #[cfg(target_os = "vita")]
 mod resources;
+#[cfg(all(target_os = "vita", feature = "video"))]
+mod video;
 #[cfg(target_os = "vita")]
 pub use commands::Draw;
 #[cfg(target_os = "vita")]

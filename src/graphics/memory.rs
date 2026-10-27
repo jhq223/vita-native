@@ -113,7 +113,7 @@ impl Block {
     fn allocate(self: &Rc<Self>, bytes: usize, alignment: usize) -> Option<Allocation> {
         let range = self.free.borrow_mut().take(bytes, alignment)?;
         Some(Allocation(Rc::new(AllocationInner {
-            block: self.clone(),
+            storage: Storage::Arena(self.clone()),
             range,
         })))
     }
@@ -142,27 +142,42 @@ impl Drop for Block {
             .ok();
     }
 }
+enum Storage {
+    Arena(Rc<Block>),
+    #[cfg(feature = "video")]
+    Video(Rc<super::video::Import>),
+}
 struct AllocationInner {
-    block: Rc<Block>,
+    storage: Storage,
     range: Range<usize>,
 }
 impl Drop for AllocationInner {
     fn drop(&mut self) {
-        self.block.free.borrow_mut().release(self.range.clone());
+        if let Storage::Arena(block) = &self.storage {
+            block.free.borrow_mut().release(self.range.clone());
+        }
     }
 }
 #[derive(Clone)]
 pub(super) struct Allocation(Rc<AllocationInner>);
 impl Allocation {
     pub fn ptr(&self) -> *mut c_void {
-        unsafe {
-            self.0
-                .block
-                .base
-                .cast::<u8>()
-                .add(self.0.range.start)
-                .cast()
-        }
+        let base = match &self.0.storage {
+            Storage::Arena(block) => block.base as usize,
+            #[cfg(feature = "video")]
+            Storage::Video(import) => import.pointer(),
+        };
+        (base + self.0.range.start) as *mut c_void
+    }
+    pub fn writable(&self) -> bool {
+        matches!(self.0.storage, Storage::Arena(_))
+    }
+    #[cfg(feature = "video")]
+    pub fn video(import: Rc<super::video::Import>, range: Range<usize>) -> Self {
+        Self(Rc::new(AllocationInner {
+            storage: Storage::Video(import),
+            range,
+        }))
     }
     pub fn len(&self) -> usize {
         self.0.range.len()
@@ -174,7 +189,7 @@ impl Allocation {
         Rc::strong_count(&self.0) > 1
     }
     pub fn write(&self, offset: usize, bytes: &[u8]) {
-        assert!(offset + bytes.len() <= self.len());
+        assert!(self.writable() && offset + bytes.len() <= self.len());
         unsafe {
             core::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),

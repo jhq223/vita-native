@@ -211,6 +211,34 @@ impl VideoCopy<'_> {
         )?;
         Ok(Picture { pts: self.pts })
     }
+    /// Copy into exclusive sampled-compatible storage, preserving its padded row
+    /// strides. Sealing the destination afterwards removes every writable alias.
+    pub fn copy_to_native(&self, output: &mut super::Nv12Buffer) -> Result<Picture, String> {
+        let layout = output.layout();
+        if layout.size != [self.info.width, self.info.height] {
+            return Err("native NV12 extent mismatch".into());
+        }
+        let (y, uv) = output.planes_mut();
+        let width = self.info.width as usize;
+        if layout.strides == [width as u32; 2] {
+            return self.copy_into(y, uv);
+        }
+        for (dest, source) in y
+            .chunks_exact_mut(layout.strides[0] as usize)
+            .zip(self.source.chunks_exact(self.stride))
+            .take(self.info.height as usize)
+        {
+            copy_bytes(&mut dest[..width], &source[..width])?;
+        }
+        for (dest, source) in uv
+            .chunks_exact_mut(layout.strides[1] as usize)
+            .zip(self.source[self.stride * self.rows..].chunks_exact(self.stride))
+            .take(self.info.height as usize / 2)
+        {
+            copy_bytes(&mut dest[..width], &source[..width])?;
+        }
+        Ok(Picture { pts: self.pts })
+    }
     /// Allocate and initialize visible NV12 planes exactly once. The caller's
     /// pre-reserved output owns these vectors; no redundant zero fill occurs.
     pub fn copy_owned(&self) -> Result<(Picture, [Vec<u8>; 2]), String> {
