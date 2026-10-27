@@ -3,6 +3,10 @@ use std::prelude::v1::*;
 
 pub(super) const CHUNK_FRAMES: usize = 1024;
 
+pub(super) fn payload_bytes(reported: usize, channels: usize, samples: usize) -> usize {
+    reported.min(samples * channels * 2)
+}
+
 pub(super) struct Packet {
     pub bytes: usize,
     pub offset: usize,
@@ -55,6 +59,29 @@ pub(super) fn first_sample(next: Option<u64>, reported_ms: u64, rate: u32) -> u6
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_padding_never_extends_an_aac_frame() {
+        for samples in [960, 1024] {
+            for channels in [1, 2] {
+                let valid = samples * channels * 2;
+                let mut source = vec![0; 4096];
+                source[valid..].fill(0x7f);
+                let mut packet = Packet {
+                    bytes: payload_bytes(source.len(), channels, samples),
+                    offset: 0,
+                    rate: 48000,
+                    channels,
+                    first_sample: 0,
+                };
+                let mut output = Vec::new();
+                packet.write(&source, 0, &mut output).unwrap();
+                assert_eq!(output.len(), samples);
+                assert!(output.iter().all(|frame| *frame == [0.; 2]));
+                assert_eq!(packet.frames(), 0);
+            }
+        }
+    }
+
     #[test]
     fn pcm_extremes_and_mono_duplication() {
         let samples = [i16::MIN, -1, 0, i16::MAX];

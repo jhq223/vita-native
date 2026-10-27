@@ -57,7 +57,9 @@ submitted PCM before acknowledging; `stop` joins the worker and releases the por
 
 Video owns a seekable input and an allocation budget supplied by the application.
 Output polling copies each native picture or PCM block into caller-owned storage
-before AvPlayer can recycle it. `Pending`, `Ready` and `End` identify progress.
+before AvPlayer can recycle it. Opening waits for native playback readiness; AAC
+frame lengths exclude padding from the PCM clock. `Pending`, `Ready` and `End`
+identify progress.
 
 ## Building
 

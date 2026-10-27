@@ -27,6 +27,7 @@ use std::{
 const INPUT_BYTES: usize = 64 << 10;
 const ALLOCATIONS: usize = 256;
 const MAX_PCM_BYTES: u32 = 256 << 10;
+const STATE_PLAY: i32 = 3;
 
 struct Allocator {
     budget: Arc<dyn MemoryBudget>,
@@ -119,10 +120,18 @@ unsafe extern "C" fn release(arg: *mut c_void, pointer: *mut c_void) {
 }
 
 struct Input {
+    started: AtomicBool,
     source: Mutex<BufReader<Box<dyn Source>>>,
     length: u64,
     failure: Mutex<Option<String>>,
     _storage: Box<dyn MemoryReservation>,
+}
+unsafe extern "C" fn event(arg: *mut c_void, id: i32, _: i32, _: *mut c_void) {
+    let input = unsafe { &*arg.cast::<Input>() };
+    // SCE_AVPLAYER_STATE_PLAY confirms asynchronous stream setup is complete.
+    if id == STATE_PLAY {
+        input.started.store(true, Ordering::Release);
+    }
 }
 unsafe extern "C" fn open_file(_: *mut c_void, _: *const c_char) -> i32 {
     0
@@ -245,6 +254,7 @@ pub struct Player {
     origin: u64,
     video_duration: f64,
     audio_endpoint: Option<u64>,
+    audio_frame_samples: usize,
     audio_position: u64,
     audio_next: Option<u64>,
     pending_audio: Option<PendingAudio>,
@@ -281,7 +291,8 @@ fn module() -> Result<(), String> {
 impl Player {
     /// Own the resource stream and initialize this profile's hardware decoder.
     /// Source read-ahead, SPS metadata and native allocation descriptors reserve
-    /// bounded storage before allocation. SDK payload reservations remain exact.
+    /// bounded storage before allocation. Stream setup waits for the native Play
+    /// event before returning, so an immediate seek follows decoder readiness.
     pub fn open(
         mut source: Box<dyn Source>,
         budget: Arc<dyn MemoryBudget>,
@@ -312,6 +323,7 @@ impl Player {
             _slots: slots,
         });
         let mut input = Box::new(Input {
+            started: AtomicBool::new(false),
             source: Mutex::new(source),
             length,
             failure: Mutex::new(None),
@@ -328,6 +340,8 @@ impl Player {
         data.fileReplacement.close = Some(close_file);
         data.fileReplacement.readOffset = Some(read_file);
         data.fileReplacement.size = Some(file_size);
+        data.eventReplacement.objectPointer = (&mut *input as *mut Input).cast();
+        data.eventReplacement.eventCallback = Some(event);
         data.basePriority = 0xa0;
         data.numOutputVideoFrameBuffers = 2;
         data.autoStart = 1;
@@ -347,6 +361,7 @@ impl Player {
             sps_storage: Some(metadata.sps_storage),
             origin: 0,
             audio_endpoint: None,
+            audio_frame_samples: metadata.audio_frame_samples,
             audio_position: 0,
             audio_next: None,
             pending_audio: None,
@@ -401,14 +416,14 @@ impl Player {
                     overall_end = overall_end.max(stream.startTime.saturating_add(stream.duration));
                 }
             }
-            if video && audio {
+            if video && audio && self.input.as_ref().unwrap().started.load(Ordering::Acquire) {
                 if overall_end > self.origin {
                     self.info.duration = overall_end.saturating_sub(self.origin) as f64 / 1000.;
                 }
                 return Ok(());
             }
             if crate::app::time::monotonic_micros().saturating_sub(self.opened) >= 10_000_000 {
-                return Err("AvPlayer did not expose the MP4 tracks within 10 seconds".into());
+                return Err("AvPlayer did not start the MP4 tracks within 10 seconds".into());
             }
             crate::app::time::sleep(Duration::from_millis(2)).map_err(|e| e.to_string())?;
         }
@@ -488,9 +503,12 @@ impl Player {
         self.audio_next = None;
         self.audio_position = 0;
         let position = ((seconds * 1000.) as u64).saturating_add(self.origin);
-        check("seek AvPlayer source", unsafe {
-            sdk::sceAvPlayerJumpToTime(self.handle(), position)
-        })?;
+        let result = unsafe { sdk::sceAvPlayerJumpToTime(self.handle(), position) };
+        if result < 0 {
+            return Err(format!(
+                "seek AvPlayer source to {position} ms: 0x{result:08x}"
+            ));
+        }
         self.seen_active = false;
         self.seen_video = false;
         self.final_picture_received = false;
@@ -589,6 +607,7 @@ impl Player {
         self.final_picture_received = raw.timeStamp >= final_ms;
         Ok(Poll::Ready(copied))
     }
+    /// Copy valid AAC samples, excluding native buffer padding.
     /// Initialize at most 1024 owned stereo frames in the caller's pre-reserved
     /// output. Pending performs no float allocation or initialization. Larger
     /// SDK packets retain one budgeted integer copy, bounded at 256 KiB. Short
@@ -619,7 +638,10 @@ impl Player {
                     "AvPlayer returned PCM outside the admitted mono/stereo packet profile".into(),
                 );
             }
-            let bytes = details.size as usize;
+            // AvPlayer can report stereo-sized storage for a mono AAC frame.
+            // The codec frame length determines valid PCM, including 960-sample AAC.
+            let bytes =
+                pcm::payload_bytes(details.size as usize, channels, self.audio_frame_samples);
             if raw.pData.is_null()
                 || !self
                     .memory

@@ -17,6 +17,7 @@ pub(super) struct Atom {
 
 pub(super) struct Metadata {
     pub info: Info,
+    pub audio_frame_samples: usize,
     pub sps: Vec<u8>,
     pub sps_storage: Box<dyn MemoryReservation>,
 }
@@ -160,7 +161,7 @@ impl<R: Read + Seek + ?Sized> Reader<'_, R> {
         }
         Err("MP4 esds descriptor length exceeds four bytes".into())
     }
-    fn aac(&mut self, entry: Atom) -> Result<(u16, u32), String> {
+    fn aac(&mut self, entry: Atom) -> Result<(u16, u32, usize), String> {
         let esds = self.find(entry, b"esds", 28)?;
         let es = self.descriptor(esds, 4, 3)?;
         let flags = self.bytes::<1>(es, 2)?[0];
@@ -196,7 +197,7 @@ impl<R: Read + Seek + ?Sized> Reader<'_, R> {
                 "Vita AAC channel configuration {channels} requires mono or stereo"
             ));
         }
-        Ok((channels, rate))
+        Ok((channels, rate, if bits & 4 == 0 { 1024 } else { 960 }))
     }
 }
 
@@ -301,9 +302,10 @@ pub(super) fn read<R: Read + Seek + ?Sized>(
             duration: timeline.duration,
             frame_duration: timeline.frame_duration,
             final_picture_time: timeline.final_picture_time,
-            audio_sample_rate: audio.map(|(_, rate)| rate),
-            audio_channels: audio.map_or(0, |(channels, _)| channels),
+            audio_sample_rate: audio.map(|(_, rate, _)| rate),
+            audio_channels: audio.map_or(0, |(channels, _, _)| channels),
         },
+        audio_frame_samples: audio.map_or(0, |(_, _, samples)| samples),
         sps,
         sps_storage,
     })

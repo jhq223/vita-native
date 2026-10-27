@@ -51,6 +51,7 @@ vita-native = { git = "https://github.com/jhq223/vita-native", rev = "COMMIT", f
 
 视频拥有可定位输入流，并使用应用提供的内存额度。
 输出轮询在 AvPlayer 回收数据前，将画面或 PCM 复制到调用方存储。
+打开操作等待原生播放就绪；PCM 按 AAC 帧长读取有效采样，缓冲填充不计入播放时钟。
 `Pending`、`Ready` 和 `End` 分别表示等待、取得数据和结束。
 
 ## 构建
