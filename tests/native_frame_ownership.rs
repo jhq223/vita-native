@@ -81,6 +81,7 @@ fn sealed_readers_and_simulated_flight_delay_pool_reuse_without_extra_copy() {
 fn cancellation_releases_idle_blocks_but_keeps_sealed_storage_and_padding_valid() {
     let budget = Arc::new(Budget::default());
     let pool = Nv12Pool::new([10, 6], 2 << 20, budget.clone()).unwrap();
+    let metadata = budget.0.load(Ordering::SeqCst);
     let a = pool.acquire().unwrap().unwrap();
     let b = pool.acquire().unwrap().unwrap().seal();
     assert_eq!(b.strides(), [16, 16]);
@@ -88,7 +89,7 @@ fn cancellation_releases_idle_blocks_but_keeps_sealed_storage_and_padding_valid(
     assert_eq!(b.plane(1), &[0; 48]);
     drop(a);
     drop(pool);
-    assert_eq!(budget.0.load(Ordering::SeqCst), 1 << 20);
+    assert_eq!(budget.0.load(Ordering::SeqCst), (1 << 20) + metadata);
     assert_eq!(b.size(), [10, 6]);
     drop(b);
     assert_eq!(budget.0.load(Ordering::SeqCst), 0);

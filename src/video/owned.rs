@@ -9,12 +9,15 @@ struct PoolState {
     free: Vec<MemoryBlock>,
     allocated: usize,
 }
+struct Metadata {
+    _ticket: Mutex<Box<dyn MemoryReservation>>,
+}
 struct PoolInner {
     state: Mutex<PoolState>,
     budget: Arc<dyn MemoryBudget>,
     layout: Layout,
     blocks: usize,
-    _metadata: Mutex<Box<dyn MemoryReservation>>,
+    metadata: Arc<Metadata>,
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Layout {
@@ -69,7 +72,9 @@ impl Nv12Pool {
                     + 2 * std::mem::size_of::<usize>());
         let metadata = budget.reserve(metadata_bytes as u64)?;
         Ok(Self(Arc::new(PoolInner {
-            _metadata: Mutex::new(metadata),
+            metadata: Arc::new(Metadata {
+                _ticket: Mutex::new(metadata),
+            }),
             state: Mutex::new(PoolState {
                 free: Vec::with_capacity(blocks),
                 allocated: 0,
@@ -101,6 +106,7 @@ impl Nv12Pool {
             block: Some(block),
             layout: self.0.layout,
             pool: Arc::downgrade(&self.0),
+            metadata: self.0.metadata.clone(),
         }))
     }
 }
@@ -109,6 +115,7 @@ pub struct Nv12Buffer {
     block: Option<MemoryBlock>,
     layout: Layout,
     pool: Weak<PoolInner>,
+    metadata: Arc<Metadata>,
 }
 impl Nv12Buffer {
     pub(crate) fn layout(&self) -> Layout {
@@ -131,6 +138,7 @@ impl Nv12Buffer {
             block: Mutex::new(self.block.take()),
             layout: self.layout,
             pool: self.pool.clone(),
+            _metadata: self.metadata.clone(),
         }))
     }
 }
@@ -151,6 +159,7 @@ struct Sealed {
     block: Mutex<Option<MemoryBlock>>,
     layout: Layout,
     pool: Weak<PoolInner>,
+    _metadata: Arc<Metadata>,
 }
 impl Drop for Sealed {
     fn drop(&mut self) {
