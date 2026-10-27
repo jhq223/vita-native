@@ -153,8 +153,10 @@ struct AllocationInner {
 }
 impl Drop for AllocationInner {
     fn drop(&mut self) {
-        if let Storage::Arena(block) = &self.storage {
-            block.free.borrow_mut().release(self.range.clone());
+        match &self.storage {
+            Storage::Arena(block) => block.free.borrow_mut().release(self.range.clone()),
+            #[cfg(feature = "video")]
+            Storage::Video(_) => {}
         }
     }
 }

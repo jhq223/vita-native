@@ -332,7 +332,7 @@ impl Context {
                 self.command("texture mip filter", unsafe {
                     sceGxmTextureSetMipFilter(
                         &mut raw,
-                        if t.mip_count() > 1 {
+                        if t.mip_count() > 1 && matches!(filter, TextureFilter::Linear) {
                             SCE_GXM_TEXTURE_MIP_FILTER_ENABLED
                         } else {
                             SCE_GXM_TEXTURE_MIP_FILTER_DISABLED
