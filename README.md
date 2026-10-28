@@ -131,6 +131,10 @@ work keeps its resources until completion. When kernel allocation reports exhaus
 physical pages, the device releases idle caches in that physical domain and retries
 once if storage was released. Retained blocks remain charged to their physical domain.
 
+`Context::copy_texture` copies unscaled RGBA8 rectangles between independent
+strided render targets using PTLA. Fragment/transfer dependencies and the final
+notification retain both allocations. Applications keep drawing paths for other formats.
+
 ## Ownership and threads
 
 Create and use a graphics context on one thread. Textures, programs and geometry

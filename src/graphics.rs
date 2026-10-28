@@ -29,6 +29,8 @@ mod retained;
 #[cfg(any(target_os = "vita", test))]
 mod suballoc;
 #[cfg(any(target_os = "vita", test))]
+mod texture_copy;
+#[cfg(any(target_os = "vita", test))]
 mod timing;
 mod types;
 #[cfg(any(target_os = "vita", test))]
