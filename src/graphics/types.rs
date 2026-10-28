@@ -24,6 +24,21 @@ pub enum Error {
         /// Configured maximum capacity for this domain.
         limit: u64,
     },
+    /// Kernel pages could not satisfy a mapped-block request after idle reclamation.
+    Allocation {
+        /// Physical domain requested by the block.
+        domain: &'static str,
+        /// Rounded contiguous block size requested from the kernel.
+        requested: u64,
+        /// Kernel free bytes after failure, when its query succeeds. Free pages
+        /// can be fragmented and describe total space rather than one extent.
+        available: Option<u64>,
+        /// Domain commitments excluding this failed request; includes other
+        /// pending reservations and retained blocks.
+        committed: u64,
+        /// Original signed sceKernelAllocMemBlock result.
+        code: i32,
+    },
     /// Caller-supplied MAIN physical budget rejected an allocation.
     Admission(crate::memory::MemoryBudgetError),
     /// Native construction failed before submission.

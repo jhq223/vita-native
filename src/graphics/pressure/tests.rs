@@ -49,7 +49,7 @@ fn exhaustion_reclaims_same_domain_idle_blocks_but_preserves_flights() {
     drop(retain(&cdram, &cdram_freed, 8, None));
     let calls = Cell::new(0);
     let uid = pressure
-        .allocate(Domain::Main, &fault, || {
+        .allocate(Domain::Main, 8, &fault, || {
             calls.set(calls.get() + 1);
             if main_freed.get() >= 4 { 12 } else { MAIN_FULL }
         })
@@ -62,13 +62,21 @@ fn exhaustion_reclaims_same_domain_idle_blocks_but_preserves_flights() {
     assert_eq!(flight.bytes, 8);
     drop(flight);
     assert!(matches!(
-        pressure.allocate(Domain::Main, &fault, || MAIN_FULL),
-        Err(Error::Sdk("sceKernelAllocMemBlock", MAIN_FULL))
+        pressure.allocate(Domain::Main, 8, &fault, || MAIN_FULL),
+        Err(Error::Allocation {
+            code: MAIN_FULL,
+            requested: 8,
+            ..
+        })
     ));
     assert_eq!(main_freed.get(), 12);
     assert!(matches!(
-        pressure.allocate(Domain::Cdram, &fault, || CDRAM_FULL),
-        Err(Error::Sdk("sceKernelAllocMemBlock", CDRAM_FULL))
+        pressure.allocate(Domain::Cdram, 8, &fault, || CDRAM_FULL),
+        Err(Error::Allocation {
+            code: CDRAM_FULL,
+            requested: 8,
+            ..
+        })
     ));
     assert_eq!(cdram_freed.get(), 8);
 }
@@ -83,7 +91,7 @@ fn success_unrelated_errors_and_empty_caches_do_not_retry() {
     drop(retain(&pool, &freed, 8, None));
     for code in [21, -1, CDRAM_FULL] {
         let calls = Cell::new(0);
-        let result = pressure.allocate(Domain::Main, &fault, || {
+        let result = pressure.allocate(Domain::Main, 8, &fault, || {
             calls.set(calls.get() + 1);
             code
         });
@@ -101,7 +109,7 @@ fn success_unrelated_errors_and_empty_caches_do_not_retry() {
     let calls = Cell::new(0);
     assert!(
         pressure
-            .allocate(Domain::Main, &fault, || {
+            .allocate(Domain::Main, 8, &fault, || {
                 calls.set(calls.get() + 1);
                 MAIN_FULL
             })
@@ -123,7 +131,7 @@ fn release_fault_stops_reclamation_and_second_allocation() {
     drop(retain(&later, &freed, 8, None));
     let calls = Cell::new(0);
     assert!(matches!(
-        pressure.allocate(Domain::Main, &fault, || {
+        pressure.allocate(Domain::Main, 8, &fault, || {
             calls.set(calls.get() + 1);
             MAIN_FULL
         }),
@@ -152,7 +160,7 @@ fn scheduling_target_allocation_can_reclaim_its_own_pool() {
         .unwrap(),
     );
     let target = Pool::get_or_create(&pool, [256, 256], 4096, |_| {
-        pressure.allocate(Domain::Main, &fault, || {
+        pressure.allocate(Domain::Main, 8, &fault, || {
             if freed.get() == 4096 { 2 } else { MAIN_FULL }
         })?;
         Ok(Rc::new(Storage {
@@ -297,4 +305,29 @@ fn shared_physical_admission_reclaims_cache_without_releasing_live_owners() {
     assert_eq!(pressure.usage(Domain::Main).available_bytes(), 32);
     drop((replacement, scanout));
     assert_eq!(pressure.usage(Domain::Cdram).committed_bytes, 0);
+}
+
+#[test]
+fn kernel_capacity_failure_retains_request_and_existing_commitments() {
+    let pressure = Pressure::default();
+    pressure.cdram.initialize(64);
+    let fault = Fault::default();
+    let existing = pressure.commit(Domain::Cdram, 24, &fault).unwrap();
+    let pending = pressure.commit(Domain::Cdram, 16, &fault).unwrap();
+    let error = pressure
+        .allocate(Domain::Cdram, 16, &fault, || CDRAM_FULL)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Allocation {
+            domain: "physical CDRAM",
+            requested: 16,
+            committed: 24,
+            available: None,
+            code: CDRAM_FULL,
+        }
+    ));
+    drop(pending);
+    assert_eq!(pressure.usage(Domain::Cdram).committed_bytes, 24);
+    drop(existing);
 }

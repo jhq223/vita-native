@@ -71,6 +71,9 @@ for that capacity. Arena separation controls lifetime and fragmentation; active 
 physical capacity and idle retention values set soft cache targets.
 Every rounded block holds its charge until successful physical release. Pressure
 reclaims only idle owners in the requested domain, then retries after real release.
+Kernel page exhaustion reports the rounded request, managed commitment, kernel
+free bytes when available, and the original SDK code. Applications can release
+rebuildable caches and retry; submitted owners remain leased through completion.
 The optional caller MAIN budget can impose an additional application quota.
 `Context::memory_state` reads physical commitment counters in constant time.
 

@@ -61,7 +61,7 @@ impl Block {
         let ticket = pressure.reserve(kind.domain(), bytes as u64, fault)?;
         let physical = pressure.commit(kind.domain(), bytes as u64, fault)?;
         let physical_main = pressure.commit_main(kind.domain(), bytes, fault)?;
-        let uid = pressure.allocate(kind.domain(), fault, || unsafe {
+        let uid = pressure.allocate(kind.domain(), bytes as u64, fault, || unsafe {
             sceKernelAllocMemBlock(
                 c"VitaGraphics".as_ptr(),
                 ty,
