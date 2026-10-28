@@ -41,9 +41,14 @@ impl Drop for Lease {
     }
 }
 impl memory::MemoryBudget for Budget {
-    fn reserve(&self, bytes: u64) -> Result<Box<dyn memory::MemoryReservation>, String> {
+    fn reserve(
+        &self,
+        bytes: u64,
+    ) -> Result<Box<dyn memory::MemoryReservation>, vita_native::memory::MemoryBudgetError> {
         if bytes > self.limit {
-            return Err("test metadata budget exceeded".into());
+            return Err(vita_native::memory::MemoryBudgetError::Capacity(
+                "test metadata budget exceeded".into(),
+            ));
         }
         self.live.fetch_add(bytes as usize, Ordering::Relaxed);
         Ok(Box::new(Lease {

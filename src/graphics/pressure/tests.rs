@@ -190,11 +190,16 @@ impl crate::memory::MemoryBudget for TestBudget {
     fn reserve(
         &self,
         bytes: u64,
-    ) -> std::result::Result<Box<dyn crate::memory::MemoryReservation>, String> {
+    ) -> std::result::Result<
+        Box<dyn crate::memory::MemoryReservation>,
+        crate::memory::MemoryBudgetError,
+    > {
         let mut state = self.state.lock().unwrap();
         state.calls += 1;
         if state.used + bytes > self.limit {
-            return Err("MAIN limit".into());
+            return Err(crate::memory::MemoryBudgetError::Capacity(
+                "MAIN limit".into(),
+            ));
         }
         state.used += bytes;
         Ok(Box::new(TestTicket {
@@ -229,9 +234,38 @@ fn main_budget_reclaims_idle_only_and_preserves_inflight_and_cdram() {
     assert_eq!(state.lock().unwrap().used, 12);
     assert_eq!(state.lock().unwrap().calls, 4);
     assert!(
-        matches!(pressure.reserve(Domain::Main, 1, &fault), Err(Error::Admission(message)) if message == "MAIN limit")
+        matches!(pressure.reserve(Domain::Main, 1, &fault), Err(Error::Admission(crate::memory::MemoryBudgetError::Capacity(message))) if message == "MAIN limit")
     );
     assert_eq!(state.lock().unwrap().calls, 5);
     drop((flight, new));
     assert_eq!(state.lock().unwrap().used, 0);
+}
+
+struct PermanentBudget;
+impl crate::memory::MemoryBudget for PermanentBudget {
+    fn reserve(
+        &self,
+        _: u64,
+    ) -> std::result::Result<
+        Box<dyn crate::memory::MemoryReservation>,
+        crate::memory::MemoryBudgetError,
+    > {
+        Err(crate::memory::MemoryBudgetError::Other(
+            "injected failure".into(),
+        ))
+    }
+}
+#[test]
+fn non_capacity_budget_failure_does_not_evict_idle_owners() {
+    let pressure = Pressure::new(Some(std::sync::Arc::new(PermanentBudget)));
+    let fault = Fault::default();
+    let idle = Rc::new(RefCell::new(Retained::new(4)));
+    pressure.register(Domain::Main, &idle);
+    let freed = Rc::new(Cell::new(0));
+    drop(retain(&idle, &freed, 4, None));
+    assert!(
+        matches!(pressure.reserve(Domain::Main, 4, &fault), Err(Error::Admission(crate::memory::MemoryBudgetError::Other(message))) if message == "injected failure")
+    );
+    assert_eq!(freed.get(), 0);
+    assert_eq!(idle.borrow().bytes(), 4);
 }

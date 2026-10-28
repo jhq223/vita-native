@@ -25,7 +25,7 @@ pub enum Error {
         limit: u64,
     },
     /// Caller-supplied MAIN physical budget rejected an allocation.
-    Admission(String),
+    Admission(crate::memory::MemoryBudgetError),
     /// Native construction failed before submission.
     Sdk(&'static str, i32),
     /// A submitted/native ownership operation failed; owners remain retained.

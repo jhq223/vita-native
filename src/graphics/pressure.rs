@@ -73,12 +73,13 @@ impl Pressure {
         };
         match budget.reserve(bytes) {
             Ok(ticket) => Ok(Some(ticket)),
-            Err(first) => {
+            Err(first @ crate::memory::MemoryBudgetError::Capacity(_)) => {
                 if self.reclaim(domain, fault)? == 0 {
                     return Err(Error::Admission(first));
                 }
                 budget.reserve(bytes).map(Some).map_err(Error::Admission)
             }
+            Err(other) => Err(Error::Admission(other)),
         }
     }
 

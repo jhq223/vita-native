@@ -45,7 +45,10 @@ impl Drop for Ticket {
     }
 }
 impl layout::MemoryBudget for Budget {
-    fn reserve(&self, bytes: u64) -> Result<Box<dyn layout::MemoryReservation>, String> {
+    fn reserve(
+        &self,
+        bytes: u64,
+    ) -> Result<Box<dyn layout::MemoryReservation>, vita_native::memory::MemoryBudgetError> {
         self.0.fetch_add(bytes as usize, Ordering::SeqCst);
         Ok(Box::new(Ticket(self.0.clone(), bytes as usize)))
     }
