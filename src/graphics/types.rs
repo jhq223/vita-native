@@ -291,6 +291,8 @@ pub struct VertexAttribute {
 /// Offline stages and the caller's interleaved f32 vertex interface.
 #[derive(Clone, Copy)]
 pub struct ProgramDescriptor<'a> {
+    /// Fragment output contract matching the supplied GXP entry point.
+    pub output: FragmentOutput,
     /// Compiled vertex stage.
     pub vertex: ShaderCode<'a>,
     /// Compiled fragment stage.
@@ -320,6 +322,17 @@ pub struct ClearProgram<'a> {
     pub color_uniform: &'a str,
     /// Name of the fragment float4 half-open pixel clip uniform.
     pub clip_uniform: &'a str,
+}
+
+/// How a fragment program produces the final color-surface value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FragmentOutput {
+    /// The SDK patches RGBA8 replacement and premultiplied source-over variants.
+    #[default]
+    Patched,
+    /// The GXP uses `__nativecolor` and declares its output register format.
+    /// The shader owns blending; draws must use `Blend::Replace`.
+    Declared,
 }
 
 /// Whether a rectangle needs fragment clipping in addition to GXM tile clipping.

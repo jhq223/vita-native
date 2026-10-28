@@ -32,6 +32,8 @@ vita-native = { git = "https://github.com/jhq223/vita-native", rev = "COMMIT", f
 应用通过 `ProgramDescriptor` 提供离线 GXP、顶点布局和反射参数名。
 片元程序可声明一个 float4 裁剪参数，接收精确到像素的裁剪边界。
 `ClearProgram` 描述应用的清空程序及参数名。程序创建后由绘制复用。
+`FragmentOutput::Declared` 接收由 `__nativecolor` 声明输出格式和混合的程序，
+绘制时使用替换模式。
 
 纹理和缓冲持有映射后的内存。场景提交保留输入资源直到片元处理完成，
 显示扫描单独保留输出。已绑定的程序持有至换绑或解绑；三个扫描缓冲通过原生

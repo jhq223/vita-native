@@ -44,6 +44,7 @@ impl Drop for Binary {
     }
 }
 pub(super) struct ProgramInner {
+    pub output: FragmentOutput,
     vertex_code: Binary,
     fragment_code: Binary,
     vertex_id: SceGxmShaderPatcherId,
@@ -276,9 +277,12 @@ impl<'a> UniformValue<'a> {
     }
 }
 impl Context {
-    /// Patch both index widths and both blend modes once. Stride and offsets use f32 elements.
+    /// Prepare both index widths and the declared fragment output contract.
+    /// Patched output supports both blend modes; declared output owns blending.
+    /// Stride and offsets use f32 elements.
     pub fn create_program(&self, descriptor: ProgramDescriptor<'_>) -> Result<Program> {
         let ProgramDescriptor {
+            output,
             vertex,
             fragment,
             bindings,
@@ -347,6 +351,7 @@ impl Context {
             .max()
             .unwrap_or(0);
         let mut inner = ProgramInner {
+            output,
             uniform_sizes,
             texture_slots,
             vertex_code: v,
@@ -415,7 +420,12 @@ impl Context {
                 )
             })?;
         }
-        for blend in 0..2 {
+        let variants = if output == FragmentOutput::Declared {
+            1
+        } else {
+            2
+        };
+        for blend in 0..variants {
             let mut info: SceGxmBlendInfo = unsafe { core::mem::zeroed() };
             info.colorMask = SCE_GXM_COLOR_MASK_ALL as u8;
             info.set_colorFunc(if blend == 0 {
@@ -444,9 +454,17 @@ impl Context {
                 sceGxmShaderPatcherCreateFragmentProgram(
                     p,
                     inner.fragment_id,
-                    SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
+                    if output == FragmentOutput::Declared {
+                        SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED
+                    } else {
+                        SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4
+                    },
                     SCE_GXM_MULTISAMPLE_NONE,
-                    &info,
+                    if output == FragmentOutput::Declared {
+                        core::ptr::null()
+                    } else {
+                        &info
+                    },
                     inner.vertex_code.ptr(),
                     &mut inner.fragment[blend],
                 )

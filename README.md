@@ -34,6 +34,8 @@ The application supplies offline GXP code, vertex layouts and reflected binding
 names through `ProgramDescriptor`. Programs may declare a float4 clipping uniform
 to support exact pixel scissors. `ClearProgram` describes the application's clear
 programs and binding names. Programs are prepared once and reused by draws.
+`FragmentOutput::Declared` accepts `__nativecolor` programs that own blending and
+the output register format; their draws use replacement mode.
 
 Textures and buffers own mapped allocations. Scene submissions retain their inputs
 until fragment completion, and display scanout retains its output independently.

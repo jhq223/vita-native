@@ -34,6 +34,7 @@ pub struct Draw<'a> {
 impl Context {
     pub(super) fn init_clear(&self, clear: ClearProgram<'_>) -> Result<()> {
         let program = self.create_program(ProgramDescriptor {
+            output: FragmentOutput::Patched,
             vertex: clear.vertex,
             fragment: clear.fragment,
             bindings: &[AttributeBinding {
@@ -172,6 +173,9 @@ impl Context {
     /// Submit one indexed hardware draw, retaining its exact owners through fragment completion.
     pub fn draw_filtered(&self, d: Draw<'_>, filter: TextureFilter) -> Result<()> {
         self.same(&d.program.0.owner)?;
+        if d.program.0.output == FragmentOutput::Declared && d.blend != Blend::Replace {
+            return Err(Error::Invalid("declared fragment output owns blending"));
+        }
         self.same(&d.vertices.owner)?;
         if d.size.contains(&0)
             || d.range.start > d.range.end
