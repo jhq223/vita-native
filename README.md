@@ -36,6 +36,11 @@ to support exact pixel scissors. `ClearProgram` describes the application's clea
 programs and binding names. Programs are prepared once and reused by draws.
 `FragmentOutput::Declared` accepts `__nativecolor` programs that own blending and
 the output register format; their draws use replacement mode.
+`ProgramDescriptor::instance` describes an optional second f32 stream indexed by
+instance number. `Draw::instances` supplies its immutable buffer and range; base
+indices wrap once per instance in original order. Each draw accepts at most
+65,535 instances, and both streams and the index allocation remain retained until
+fragment completion. Ordinary draws use one indexed stream.
 
 Textures select CDRAM or uncached MAIN through `TextureMemory`. Render targets
 select RGBA8 or single-channel alpha coverage through `TargetFormat`; their strided
