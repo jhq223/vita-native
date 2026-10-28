@@ -808,10 +808,10 @@ impl Context {
     pub fn read_rgba(&self, target: &Framebuffer, first_row: u32, output: &mut [u8]) -> Result<()> {
         self.same(&target.0.owner)?;
         let row = target.size()[0] as usize * 4;
-        let rows = if row == 0 { 0 } else { output.len() / row };
+        let rows = output.len().checked_div(row).unwrap_or(0);
         if target.texture().format() != TextureFormat::Rgba8
             || row == 0
-            || output.len() % row != 0
+            || !output.len().is_multiple_of(row)
             || (first_row as usize)
                 .checked_add(rows)
                 .is_none_or(|end| end > target.size()[1] as usize)
