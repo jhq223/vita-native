@@ -174,6 +174,9 @@ identify progress. `Nv12Pool` provides bounded output blocks that seal into immu
 allocation and initial clearing run outside the recycle lock, so completed GPU
 readers can return existing blocks during allocation. GXM imports blocks for
 sampling and retains their mapping through fragment completion; the final reader returns each block to its pool.
+Profiling builds report worker-local AvPlayer poll counts, returned timestamps,
+copy time, source stride and pause/resume residency when each decoder closes.
+These are CPU call observations; they do not measure hardware codec execution time.
 
 ## Building
 

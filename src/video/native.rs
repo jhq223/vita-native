@@ -293,6 +293,8 @@ pub struct Player {
     final_picture_received: bool,
     seen_active: bool,
     opened: u64,
+    #[cfg(feature = "profiling")]
+    profile: super::diagnostics::Profile,
     _thread: PhantomData<Rc<()>>,
 }
 
@@ -403,6 +405,8 @@ impl Player {
             final_picture_received: false,
             seen_active: false,
             opened: crate::app::time::monotonic_micros(),
+            #[cfg(feature = "profiling")]
+            profile: Default::default(),
             _thread: PhantomData,
         };
         check("open AvPlayer source", unsafe {
@@ -520,6 +524,9 @@ impl Player {
             }
         };
         check("set AvPlayer transport pause", result)?;
+        #[cfg(feature = "profiling")]
+        self.profile
+            .pause(paused, crate::app::time::monotonic_micros());
         self.paused = paused;
         Ok(())
     }
@@ -589,7 +596,15 @@ impl Player {
         let width = self.info.width as usize;
         let height = self.info.height as usize;
         let mut raw: sdk::SceAvPlayerFrameInfo = unsafe { std::mem::zeroed() };
-        if unsafe { sdk::sceAvPlayerGetVideoData(self.handle(), &mut raw) } == 0 {
+        #[cfg(feature = "profiling")]
+        let started = crate::app::time::monotonic_micros();
+        let ready = unsafe { sdk::sceAvPlayerGetVideoData(self.handle(), &mut raw) } != 0;
+        #[cfg(feature = "profiling")]
+        {
+            self.profile.polls += 1;
+            self.profile.get_us += crate::app::time::monotonic_micros().saturating_sub(started);
+        }
+        if !ready {
             return Ok(if self.ended()? {
                 Poll::End
             } else {
@@ -624,6 +639,10 @@ impl Player {
             return Err("AvPlayer returned an unowned NV12 surface".into());
         }
         let source = unsafe { std::slice::from_raw_parts(raw.pData, bytes) };
+        #[cfg(feature = "profiling")]
+        self.profile.picture(raw.timeStamp, stride, rows);
+        #[cfg(feature = "profiling")]
+        let copying = crate::app::time::monotonic_micros();
         let copied = copy(VideoCopy {
             source,
             stride,
@@ -631,6 +650,10 @@ impl Player {
             info: &self.info,
             pts: raw.timeStamp.saturating_sub(self.origin) as f64 / 1000.,
         })?;
+        #[cfg(feature = "profiling")]
+        {
+            self.profile.copy_us += crate::app::time::monotonic_micros().saturating_sub(copying);
+        }
         self.seen_video = true;
         // Composition/edit metadata and SDK frame timestamps use the movie
         // clock. Compare before subtracting the stream's native start origin.
@@ -765,6 +788,16 @@ impl Player {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
+        #[cfg(feature = "profiling")]
+        {
+            let now = crate::app::time::monotonic_micros();
+            self.profile.finish(now);
+            std::eprintln!(
+                "[vita-video] lifetime_us={} {:?}",
+                now.saturating_sub(self.opened),
+                self.profile
+            );
+        }
         let stop = unsafe { sdk::sceAvPlayerStop(handle) };
         let close = unsafe { sdk::sceAvPlayerClose(handle) };
         if close < 0 {
