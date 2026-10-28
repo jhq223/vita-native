@@ -440,7 +440,7 @@ impl Context {
             .0
             .core
             .buffers
-            .alloc(stage_stride * size[1] as usize, 16)?;
+            .upload(stage_stride * size[1] as usize, 16)?;
         for y in 0..size[1] as usize {
             stage.write(y * stage_stride, &data[y * stride..y * stride + row]);
         }

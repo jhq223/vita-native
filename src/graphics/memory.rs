@@ -1,7 +1,7 @@
 //! Owned kernel blocks and coalescing GPU suballocations.
 pub(super) use super::fault::{Fault, sdk};
 use super::pressure::{Domain, Pressure};
-use super::suballoc::FreeList;
+use super::suballoc::{BlockReservation, Class, FreeList, Lifetime};
 use super::{ArenaUsage, Error, types::Result};
 use std::{
     cell::{Cell, RefCell},
@@ -37,6 +37,7 @@ pub(super) struct Block {
     fault: Fault,
     free: RefCell<FreeList>,
     ticket: Option<Box<dyn crate::memory::MemoryReservation>>,
+    arena_bytes: Option<BlockReservation>,
 }
 impl Block {
     pub fn new(bytes: usize, kind: Kind, fault: &Fault, pressure: &Pressure) -> Result<Rc<Self>> {
@@ -73,6 +74,7 @@ impl Block {
             fault: fault.clone(),
             free: RefCell::new(FreeList::new(bytes)),
             ticket,
+            arena_bytes: None,
         };
         sdk("sceKernelGetMemBlockBase", unsafe {
             sceKernelGetMemBlockBase(uid, &mut block.base)
@@ -103,7 +105,7 @@ impl Block {
 impl Drop for Block {
     fn drop(&mut self) {
         if self.fault.get().is_some() {
-            std::mem::forget(self.ticket.take());
+            std::mem::forget((self.ticket.take(), self.arena_bytes.take()));
             return;
         }
         let code = unsafe {
@@ -116,7 +118,7 @@ impl Drop for Block {
         };
         if code < 0 {
             self.fault.record("unmap native GXM block", code);
-            std::mem::forget(self.ticket.take());
+            std::mem::forget((self.ticket.take(), self.arena_bytes.take()));
             return;
         }
         if self
@@ -126,7 +128,7 @@ impl Drop for Block {
             })
             .is_err()
         {
-            std::mem::forget(self.ticket.take());
+            std::mem::forget((self.ticket.take(), self.arena_bytes.take()));
         }
     }
 }
@@ -199,7 +201,8 @@ pub(super) struct Arena {
     name: &'static str,
     kind: Kind,
     quantum: usize,
-    blocks: RefCell<Vec<Weak<Block>>>,
+    blocks: RefCell<[Vec<Weak<Block>>; Class::COUNT]>,
+    reserved: Rc<Cell<u64>>,
     warm: Rc<RefCell<super::retained::Retained<Block>>>,
     pressure: Pressure,
     block_allocations: Cell<u64>,
@@ -227,7 +230,8 @@ impl Arena {
             } else {
                 64 * 1024
             },
-            blocks: RefCell::new(Vec::new()),
+            blocks: RefCell::new(std::array::from_fn(|_| Vec::new())),
+            reserved: Rc::new(Cell::new(0)),
             warm,
             pressure: pressure.clone(),
             block_allocations: Cell::new(0),
@@ -236,13 +240,24 @@ impl Arena {
         }
     }
     pub fn alloc(&self, bytes: usize, alignment: usize) -> Result<Allocation> {
+        self.allocate(bytes, alignment, Lifetime::Retained)
+    }
+    pub fn upload(&self, bytes: usize, alignment: usize) -> Result<Allocation> {
+        self.allocate(bytes, alignment, Lifetime::Upload)
+    }
+    fn allocate(&self, bytes: usize, alignment: usize, lifetime: Lifetime) -> Result<Allocation> {
         self.fault.check()?;
         if bytes == 0 || !alignment.is_power_of_two() {
             return Err(Error::Invalid("GPU allocation layout"));
         }
-        let mut blocks = self.blocks.borrow_mut();
+        let class = Class::new(bytes, self.quantum, lifetime);
+        let mut groups = self.blocks.borrow_mut();
+        let blocks = &mut groups[class.0];
         blocks.retain(|b| b.strong_count() > 0);
         for block in blocks.iter().filter_map(Weak::upgrade) {
+            if class.dedicated() && block.free.borrow().bytes() != block.bytes {
+                continue;
+            }
             if let Some(a) = block.allocate(bytes, alignment) {
                 self.warm.borrow_mut().touch(&block, block.bytes as u64);
                 return Ok(a);
@@ -254,18 +269,11 @@ impl Arena {
             4096
         };
         let preferred = bytes.max(self.quantum).next_multiple_of(page);
-        let capacity = || {
-            blocks
-                .iter()
-                .filter_map(Weak::upgrade)
-                .map(|b| b.bytes as u64)
-                .sum::<u64>()
-        };
-        if capacity().saturating_add(preferred as u64) > self.limit {
+        if self.reserved.get().saturating_add(preferred as u64) > self.limit {
             self.release_idle();
             self.fault.check()?;
         }
-        let used = capacity();
+        let used = self.reserved.get();
         let block_bytes =
             super::suballoc::block_size(bytes, self.quantum, page, self.limit.saturating_sub(used))
                 .ok_or(Error::Budget {
@@ -273,7 +281,13 @@ impl Arena {
                     requested: used + bytes.next_multiple_of(page) as u64,
                     limit: self.limit,
                 })?;
-        let block = Block::new(block_bytes, self.kind, &self.fault, &self.pressure)?;
+        let mut block = Block::new(block_bytes, self.kind, &self.fault, &self.pressure)?;
+        Rc::get_mut(&mut block)
+            .expect("new arena block")
+            .arena_bytes = Some(BlockReservation::new(
+            self.reserved.clone(),
+            block_bytes as u64,
+        ));
         let allocation = block.allocate(bytes, alignment).expect("new aligned block");
         blocks.push(Rc::downgrade(&block));
         self.block_allocations.set(self.block_allocations.get() + 1);
@@ -288,7 +302,13 @@ impl Arena {
             block_allocations: self.block_allocations.get(),
             ..ArenaUsage::default()
         };
-        for b in self.blocks.borrow().iter().filter_map(Weak::upgrade) {
+        for b in self
+            .blocks
+            .borrow()
+            .iter()
+            .flatten()
+            .filter_map(Weak::upgrade)
+        {
             u.blocks += 1;
             u.reserved_bytes += b.bytes as u64;
             let used = b.bytes - b.free.borrow().bytes();

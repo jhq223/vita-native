@@ -66,6 +66,11 @@ Native budget admissions distinguish heap storage, ordinary MAIN kernel blocks a
 
 The caller supplies an optional shared MAIN block budget at context construction. Every rounded MAIN kernel block retains one reservation until successful physical release; admission pressure first reclaims idle MAIN owners, and failure is reported if no capacity can be reclaimed. CDRAM has its own limits.
 
+Mapped arenas segregate small, medium and whole-block resources. Upload staging
+uses separate blocks; completed uploads cannot leave small staging allocations
+among retained graphics buffers. All classes share the arena's existing capacity
+and retention limits. Allocation and completion leases preserve physical ownership.
+
 Mapped arenas retain recently used blocks within configurable limits: 8 MiB for
 pixels and 1 MiB for buffers by default. Scheduling targets retain up to 4 MiB
 within their 16 MiB total limit. Allocation pressure releases idle owners; submitted
