@@ -86,6 +86,29 @@ impl Pressure {
         }
     }
 
+    #[cfg(target_os = "vita")]
+    pub fn commit_main(
+        &self,
+        domain: Domain,
+        bytes: usize,
+        fault: &Fault,
+    ) -> Result<crate::memory::MainCommit> {
+        if domain == Domain::Cdram {
+            return Ok(Default::default());
+        }
+        if let Some(ticket) = crate::memory::MainCommit::reserve(bytes) {
+            return Ok(ticket);
+        }
+        if self.reclaim(domain, fault)? > 0 {
+            if let Some(ticket) = crate::memory::MainCommit::reserve(bytes) {
+                return Ok(ticket);
+            }
+        }
+        Err(Error::Admission(
+            crate::memory::MemoryBudgetError::Capacity("process MAIN commitment limit".into()),
+        ))
+    }
+
     pub fn allocate(
         &self,
         domain: Domain,

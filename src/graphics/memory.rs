@@ -38,6 +38,7 @@ pub(super) struct Block {
     free: RefCell<FreeList>,
     ticket: Option<Box<dyn crate::memory::MemoryReservation>>,
     arena_bytes: Option<BlockReservation>,
+    physical_main: Option<crate::memory::MainCommit>,
 }
 impl Block {
     pub fn new(bytes: usize, kind: Kind, fault: &Fault, pressure: &Pressure) -> Result<Rc<Self>> {
@@ -57,6 +58,7 @@ impl Block {
             SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE
         };
         let ticket = pressure.reserve(kind.domain(), bytes as u64, fault)?;
+        let physical_main = pressure.commit_main(kind.domain(), bytes, fault)?;
         let uid = pressure.allocate(kind.domain(), fault, || unsafe {
             sceKernelAllocMemBlock(
                 c"VitaGraphics".as_ptr(),
@@ -75,6 +77,7 @@ impl Block {
             free: RefCell::new(FreeList::new(bytes)),
             ticket,
             arena_bytes: None,
+            physical_main: Some(physical_main),
         };
         sdk("sceKernelGetMemBlockBase", unsafe {
             sceKernelGetMemBlockBase(uid, &mut block.base)
@@ -105,7 +108,11 @@ impl Block {
 impl Drop for Block {
     fn drop(&mut self) {
         if self.fault.get().is_some() {
-            std::mem::forget((self.ticket.take(), self.arena_bytes.take()));
+            std::mem::forget((
+                self.ticket.take(),
+                self.arena_bytes.take(),
+                self.physical_main.take(),
+            ));
             return;
         }
         let code = unsafe {
@@ -118,7 +125,11 @@ impl Drop for Block {
         };
         if code < 0 {
             self.fault.record("unmap native GXM block", code);
-            std::mem::forget((self.ticket.take(), self.arena_bytes.take()));
+            std::mem::forget((
+                self.ticket.take(),
+                self.arena_bytes.take(),
+                self.physical_main.take(),
+            ));
             return;
         }
         if self
@@ -128,7 +139,11 @@ impl Drop for Block {
             })
             .is_err()
         {
-            std::mem::forget((self.ticket.take(), self.arena_bytes.take()));
+            std::mem::forget((
+                self.ticket.take(),
+                self.arena_bytes.take(),
+                self.physical_main.take(),
+            ));
         }
     }
 }

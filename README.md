@@ -9,6 +9,7 @@ Native calls use `vitasdk-sys = 0.3.3` and the VitaSDK import libraries.
 | --- | --- |
 | `graphics` | GXM contexts, offline GXP programs, textures, buffers, commands, completion and presentation |
 | `app` | Application identity, controller/touch input, IME, power callbacks, IO and memory |
+| `process-allocator` | One growing C/newlib/Rust process heap backed by independent system mspaces |
 | `audio` | Fixed-buffer AudioOut playback with explicit pause and drain |
 | `video` | AvPlayer decoding from a seekable stream into caller-owned video and PCM buffers |
 
@@ -27,6 +28,36 @@ vita-native = { git = "https://github.com/jhq223/vita-native", rev = "COMMIT", f
 
 Use `default-features = false` and select `graphics`, `app`, `audio` or `video`
 for a narrower build. Audio and video enable the host services they use.
+
+## Process heap
+
+`process-allocator` opts the final executable into a single C/newlib/Rust heap.
+Retain `vita_native_process_heap_anchor` with the linker before CRT startup; call
+`allocator::configure_main_budget` before starting graphics or session/media workers.
+The CRT creates one 1 MiB cached MAIN arena. Small allocations reuse this arena;
+growth obtains independent page-rounded MAIN blocks with their own system
+`sceClibMspace` and kernel UID. The 1 MiB minimum arena size follows the supported
+CPU page sizes and amortizes kernel allocation; only the first arena stays warm.
+An empty additional arena returns its whole kernel block. A failed kernel release
+retains its UID and committed bytes for a later non-real-time retry.
+
+Ordinary and `_reent` allocation functions share the same ownership and kernel
+mutex. Zero-sized requests reserve a minimum object; `realloc(p, 0)` preserves
+newlib's minimum-object behavior. Failed reallocations retain the old object.
+Aligned allocation validates arithmetic and power-of-two alignment. No heap hook
+allocates Rust metadata, performs IO, or invokes application callbacks. Audio
+callbacks continue to use only their previously allocated buffers.
+
+Physical MAIN admission counts complete CPU arenas and native graphics blocks
+once, including arena headers and page rounding. Configuration observes current
+kernel free MAIN plus already committed managed blocks; it does not assume the
+entire extended SFO budget is free. Loaded code, existing stacks, SceLibc heaps
+and SDK allocations already reduce that observation. Later unmanaged allocations
+can still make kernel allocation fail. VM-local quotas remain independent:
+shared verified code is admitted by each VM but is physically stored once.
+`allocator::stats` reports committed capacity and the original release error.
+The process heap remains available through newlib teardown; final CRT cleanup
+requires application workers and device owners to have finished.
 
 ## Graphics
 

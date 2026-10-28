@@ -9,6 +9,7 @@
 | --- | --- |
 | `graphics` | GXM 上下文、离线 GXP 程序、纹理、缓冲、绘制、完成通知和呈现 |
 | `app` | 应用标识、手柄与触摸输入、系统键盘、电源回调、文件和内存 |
+| `process-allocator` | 基于独立系统 mspace 的统一 C/newlib/Rust 可增长进程堆 |
 | `audio` | 固定缓冲的 AudioOut 播放、暂停与排空 |
 | `video` | AvPlayer 从可定位流解码，将视频和 PCM 交给调用方持有 |
 
@@ -26,6 +27,28 @@ vita-native = { git = "https://github.com/jhq223/vita-native", rev = "COMMIT", f
 
 按需构建时设置 `default-features = false`，再选择 `graphics`、`app`、`audio` 或 `video`。
 音频和视频会启用自身使用的系统服务。
+
+## 进程堆
+
+`process-allocator` 为最终可执行程序启用统一 C/newlib/Rust 进程堆。
+链接器保留 `vita_native_process_heap_anchor`，使 CRT 启动前接入分配函数；
+应用在启动图形及会话/媒体工作线程前调用 `allocator::configure_main_budget`。
+CRT 创建一个 1 MiB 缓存 MAIN arena，小分配复用已有 arena；增长按页取得独立
+MAIN 块，每块保留自身的 `sceClibMspace` 与内核 UID。1 MiB 最小 arena 尺寸对应 CPU
+支持的页尺寸并摊薄内核分配成本，仅首块保持温热。其余 arena 完全空闲后归还整块。
+内核释放失败时保留 UID 和提交费用，由后续非实时分配重试。
+
+普通和 `_reent` 分配函数共用所有权与内核互斥锁。零尺寸申请取得最小对象，
+`realloc(p, 0)` 保留 newlib 的最小对象语义，重分配失败保留旧对象。
+对齐分配验证算术和二次幂对齐。堆钩子仅使用固定元数据与系统调用；
+实时音频回调继续消费预分配缓冲。进程堆保持到 newlib 收尾完成，
+最终 CRT 清理前由应用结束工作线程及设备所有者。
+
+物理 MAIN 准入按完整 CPU arena 与原生图形块计量一次，包含头部和页对齐。
+配置从内核当前空闲 MAIN 加已提交的纳管块取得容量；程序、已有线程栈、SceLibc
+堆和 SDK 分配已从该观测扣除。之后的未纳管分配仍可能导致内核分配失败。
+每个 VM 保留本地准入额度，共享验证代码的物理存储保持一次计量。
+`allocator::stats` 返回实际提交容量和原生释放错误。
 
 ## 图形
 
