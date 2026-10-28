@@ -116,36 +116,14 @@ impl Context {
             size,
         });
         self.command("sceGxmBeginScene", code)?;
+        self.0.bindings.borrow_mut().begin_scene();
         self.viewport(size);
-        unsafe {
-            let c = self.0.core.native.context;
-            sceGxmSetCullMode(c, SCE_GXM_CULL_NONE);
-            sceGxmSetFrontDepthFunc(c, SCE_GXM_DEPTH_FUNC_ALWAYS);
-            sceGxmSetBackDepthFunc(c, SCE_GXM_DEPTH_FUNC_ALWAYS);
-            sceGxmSetFrontDepthWriteEnable(c, SCE_GXM_DEPTH_WRITE_DISABLED);
-            sceGxmSetBackDepthWriteEnable(c, SCE_GXM_DEPTH_WRITE_DISABLED);
-            sceGxmSetFrontStencilFunc(
-                c,
-                SCE_GXM_STENCIL_FUNC_ALWAYS,
-                SCE_GXM_STENCIL_OP_KEEP,
-                SCE_GXM_STENCIL_OP_KEEP,
-                SCE_GXM_STENCIL_OP_KEEP,
-                255,
-                0,
-            );
-            sceGxmSetBackStencilFunc(
-                c,
-                SCE_GXM_STENCIL_FUNC_ALWAYS,
-                SCE_GXM_STENCIL_OP_KEEP,
-                SCE_GXM_STENCIL_OP_KEEP,
-                SCE_GXM_STENCIL_OP_KEEP,
-                255,
-                0,
-            );
-        }
         Ok(())
     }
     fn viewport(&self, size: [u32; 2]) {
+        if !self.0.bindings.borrow_mut().viewport(size) {
+            return;
+        }
         // SAFETY: recording owns a live immediate context. Viewport changes are
         // scene state; the valid region and color-surface clip retain storage bounds.
         unsafe {
@@ -282,15 +260,18 @@ impl Context {
             });
         }
         drop(bound);
-        unsafe {
-            sceGxmSetRegionClip(
-                c,
-                SCE_GXM_REGION_CLIP_OUTSIDE,
-                min[0],
-                min[1],
-                max[0] - 1,
-                max[1] - 1,
-            );
+        let mut bindings = self.0.bindings.borrow_mut();
+        if bindings.clip([min[0], min[1], max[0], max[1]]) {
+            unsafe {
+                sceGxmSetRegionClip(
+                    c,
+                    SCE_GXM_REGION_CLIP_OUTSIDE,
+                    min[0],
+                    min[1],
+                    max[0] - 1,
+                    max[1] - 1,
+                );
+            }
         }
         let mut vertex = core::ptr::null_mut();
         let mut fragment = core::ptr::null_mut();
@@ -310,12 +291,17 @@ impl Context {
         }
         if let Some(parameter) = d.program.0.clip {
             let clip = [min[0] as f32, min[1] as f32, max[0] as f32, max[1] as f32];
-            self.command("exact fragment clip", unsafe {
-                sceGxmSetUniformDataF(fragment, parameter, 0, 4, clip.as_ptr())
-            })?;
+            parameter.upload(&clip, vertex, fragment)?;
         }
         for (unit, t) in d.textures.iter().enumerate() {
             let mut raw = t.0.raw.get();
+            // SAFETY: SceGxmTexture is four initialized control words. Its C
+            // layout consists of two 32-bit unions and one 64-bit bitfield,
+            // without padding. Constructors zero the complete descriptor.
+            let descriptor = unsafe { core::mem::transmute::<SceGxmTexture, [u32; 4]>(raw) };
+            if !bindings.texture(unit, descriptor, filter) {
+                continue;
+            }
             let f = match filter {
                 TextureFilter::Nearest => SCE_GXM_TEXTURE_FILTER_POINT,
                 TextureFilter::Linear => SCE_GXM_TEXTURE_FILTER_LINEAR,
@@ -344,9 +330,11 @@ impl Context {
                 sceGxmSetFragmentTexture(c, unit as u32, &raw)
             })?;
         }
-        self.command("vertex stream", unsafe {
-            sceGxmSetVertexStream(c, 0, d.vertices.allocation.ptr().cast())
-        })?;
+        if bindings.vertex(d.vertices.allocation.ptr() as usize) {
+            self.command("vertex stream", unsafe {
+                sceGxmSetVertexStream(c, 0, d.vertices.allocation.ptr().cast())
+            })?;
+        }
         self.command("sceGxmDraw", unsafe {
             sceGxmDraw(
                 c,

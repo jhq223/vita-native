@@ -162,6 +162,33 @@ impl Native {
         sdk("sceGxmCreateContext", unsafe {
             sceGxmCreateContext(&params, &mut n.context)
         })?;
+        // Fixed pipeline state persists across scenes for this private context.
+        unsafe {
+            let c = n.context;
+            sceGxmSetCullMode(c, SCE_GXM_CULL_NONE);
+            sceGxmSetFrontDepthFunc(c, SCE_GXM_DEPTH_FUNC_ALWAYS);
+            sceGxmSetBackDepthFunc(c, SCE_GXM_DEPTH_FUNC_ALWAYS);
+            sceGxmSetFrontDepthWriteEnable(c, SCE_GXM_DEPTH_WRITE_DISABLED);
+            sceGxmSetBackDepthWriteEnable(c, SCE_GXM_DEPTH_WRITE_DISABLED);
+            sceGxmSetFrontStencilFunc(
+                c,
+                SCE_GXM_STENCIL_FUNC_ALWAYS,
+                SCE_GXM_STENCIL_OP_KEEP,
+                SCE_GXM_STENCIL_OP_KEEP,
+                SCE_GXM_STENCIL_OP_KEEP,
+                255,
+                0,
+            );
+            sceGxmSetBackStencilFunc(
+                c,
+                SCE_GXM_STENCIL_FUNC_ALWAYS,
+                SCE_GXM_STENCIL_OP_KEEP,
+                SCE_GXM_STENCIL_OP_KEEP,
+                SCE_GXM_STENCIL_OP_KEEP,
+                255,
+                0,
+            );
+        }
         let mut patch: SceGxmShaderPatcherParams = unsafe { core::mem::zeroed() };
         patch.hostAllocCallback = Some(host_alloc);
         patch.hostFreeCallback = Some(host_free);
@@ -239,11 +266,11 @@ impl Lease {
     fn uses(&self, allocation: &Allocation) -> bool {
         matches!(self, Self::Allocation(a) if a.id() == allocation.id())
     }
-    fn key(&self) -> usize {
+    fn key(&self) -> (u8, usize) {
         match self {
-            Self::Allocation(a) => a.id(),
-            Self::Program(p) => Rc::as_ptr(&p.0) as usize,
-            Self::Target(f) => Rc::as_ptr(&f.0) as usize,
+            Self::Allocation(a) => (0, a.id()),
+            Self::Program(p) => (1, Rc::as_ptr(&p.0) as usize),
+            Self::Target(f) => (2, Rc::as_ptr(&f.0) as usize),
         }
     }
 }
@@ -306,6 +333,7 @@ pub(super) struct Inner {
     pub vsync: Cell<bool>,
     pub clear: RefCell<Option<Clear>>,
     pub bound_program: RefCell<Option<BoundProgram>>,
+    pub bindings: RefCell<super::bindings::Bindings>,
     pub display_detached: Cell<bool>,
     pub identity: RefCell<Option<Allocation>>,
 }
@@ -424,6 +452,7 @@ impl Context {
             vsync: Cell::new(vsync),
             clear: RefCell::new(None),
             bound_program: RefCell::new(None),
+            bindings: RefCell::new(super::bindings::Bindings::default()),
             display_detached: Cell::new(false),
             identity: RefCell::new(None),
         }));
@@ -643,12 +672,7 @@ impl Context {
         token
     }
     pub(super) fn retain(recording: &mut Recording, lease: Lease) {
-        let key = lease.key();
-        if !recording.leases.iter().any(|r| {
-            core::mem::discriminant(r) == core::mem::discriminant(&lease) && r.key() == key
-        }) {
-            recording.leases.push(lease);
-        }
+        super::leases::retain(&mut recording.leases, lease, Lease::key);
     }
     pub(super) fn end_scene(&self, s: &mut State) -> Result<Option<Rc<Completion>>> {
         let Some(r) = s.recording.take() else {

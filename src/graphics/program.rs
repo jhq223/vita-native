@@ -50,7 +50,7 @@ pub(super) struct ProgramInner {
     fragment_id: SceGxmShaderPatcherId,
     pub vertex: [*mut SceGxmVertexProgram; 2],
     pub fragment: [*mut SceGxmFragmentProgram; 2],
-    pub clip: Option<*const SceGxmProgramParameter>,
+    pub clip: Option<Parameter>,
     pub uniform_sizes: [u32; 2],
     pub texture_slots: usize,
     pub stride: u32,
@@ -106,6 +106,60 @@ pub(super) struct Parameter {
     pub sampler: bool,
     pub resource: u32,
     pub components: u32,
+    direct_f32: bool,
+}
+impl Parameter {
+    fn reflected(raw: *const SceGxmProgramParameter, fragment: bool, buffer_bytes: u32) -> Self {
+        // SAFETY: reflection reads a validated program retained by the caller.
+        let (category, resource, width, count, ty) = unsafe {
+            (
+                sceGxmProgramParameterGetCategory(raw),
+                sceGxmProgramParameterGetResourceIndex(raw),
+                sceGxmProgramParameterGetComponentCount(raw),
+                sceGxmProgramParameterGetArraySize(raw),
+                sceGxmProgramParameterGetType(raw),
+            )
+        };
+        Self {
+            raw,
+            fragment,
+            resource,
+            sampler: category == SCE_GXM_PARAMETER_CATEGORY_SAMPLER,
+            components: width * count,
+            direct_f32: category == SCE_GXM_PARAMETER_CATEGORY_UNIFORM
+                && ty == SCE_GXM_PARAMETER_TYPE_F32
+                && super::uniform_layout::contiguous_f32(resource, width, count, buffer_bytes / 4),
+        }
+    }
+
+    pub(super) fn upload(
+        self,
+        source: &[f32],
+        vertex: *mut core::ffi::c_void,
+        fragment: *mut core::ffi::c_void,
+    ) -> Result<()> {
+        if source.len() > self.components as usize {
+            return Err(Error::Invalid("uniform component extent"));
+        }
+        let buffer = if self.fragment { fragment } else { vertex };
+        if self.direct_f32 {
+            // SAFETY: reflection admitted a contiguous F32 range within this
+            // pipeline's reserved default buffer. Source is borrowed CPU data;
+            // the ring reservation remains immutable after its first draw.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    source.as_ptr(),
+                    buffer.cast::<f32>().add(self.resource as usize),
+                    source.len(),
+                );
+            }
+            Ok(())
+        } else {
+            sdk("sceGxmSetUniformDataF", unsafe {
+                sceGxmSetUniformDataF(buffer, self.raw, 0, source.len() as u32, source.as_ptr())
+            })
+        }
+    }
 }
 /// Reflected immutable binding; keeps the owning GXP bytes and patched programs alive.
 #[derive(Clone)]
@@ -114,7 +168,8 @@ pub struct Uniform {
     pub(super) parameters: Vec<Parameter>,
 }
 impl Program {
-    /// Reflect a numeric/default-buffer or fixed TEXUNIT binding once; `[0]` names normalize.
+    /// Reflect a default-buffer numeric or fixed TEXUNIT binding once; `[0]` names normalize.
+    /// Members of explicit uniform buffers return `None`.
     pub fn uniform(&self, name: &str) -> Option<Uniform> {
         let name = CString::new(name.strip_suffix("[0]").unwrap_or(name)).ok()?;
         let mut parameters = Vec::with_capacity(2);
@@ -129,16 +184,17 @@ impl Program {
             {
                 continue;
             }
-            parameters.push(Parameter {
+            if category == SCE_GXM_PARAMETER_CATEGORY_UNIFORM
+                && unsafe { sceGxmProgramParameterGetContainerIndex(raw) }
+                    < SCE_GXM_MAX_UNIFORM_BUFFERS
+            {
+                return None;
+            }
+            parameters.push(Parameter::reflected(
                 raw,
                 fragment,
-                sampler: category == SCE_GXM_PARAMETER_CATEGORY_SAMPLER,
-                resource: unsafe { sceGxmProgramParameterGetResourceIndex(raw) },
-                components: unsafe {
-                    sceGxmProgramParameterGetComponentCount(raw)
-                        * sceGxmProgramParameterGetArraySize(raw)
-                },
-            });
+                self.0.uniform_sizes[usize::from(fragment)],
+            ));
         }
         (!parameters.is_empty()).then(|| Uniform {
             program: self.clone(),
@@ -209,18 +265,12 @@ impl<'a> UniformValue<'a> {
                 }
                 continue;
             }
-            if count > p.components as usize {
-                return Err(Error::Invalid("uniform component extent"));
-            }
-            sdk("sceGxmSetUniformDataF", unsafe {
-                sceGxmSetUniformDataF(
-                    if p.fragment { fragment } else { vertex },
-                    p.raw,
-                    0,
-                    count as u32,
-                    source,
-                )
-            })?;
+            // SAFETY: every variant above supplies count initialized F32 values.
+            p.upload(
+                unsafe { core::slice::from_raw_parts(source, count) },
+                vertex,
+                fragment,
+            )?;
         }
         Ok(())
     }
@@ -266,10 +316,16 @@ impl Context {
                     != SCE_GXM_PARAMETER_CATEGORY_UNIFORM
                 || unsafe { sceGxmProgramParameterGetComponentCount(clip) } != 4
                 || unsafe { sceGxmProgramParameterGetArraySize(clip) } != 1
+                || unsafe { sceGxmProgramParameterGetContainerIndex(clip) }
+                    < SCE_GXM_MAX_UNIFORM_BUFFERS
             {
-                return Err(Error::Invalid("clip uniform must be one float4"));
+                return Err(Error::Invalid(
+                    "clip uniform must be one default-buffer float4",
+                ));
             }
-            Some(clip)
+            Some(Parameter::reflected(clip, true, unsafe {
+                sceGxmProgramGetDefaultUniformBufferSize(f.ptr())
+            }))
         } else {
             None
         };
