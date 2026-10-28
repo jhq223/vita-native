@@ -71,13 +71,16 @@ impl Pressure {
         let Some(budget) = &self.main_budget else {
             return Ok(None);
         };
-        match budget.reserve(bytes) {
+        match budget.reserve(crate::memory::MemoryClass::MainKernel, bytes) {
             Ok(ticket) => Ok(Some(ticket)),
             Err(first @ crate::memory::MemoryBudgetError::Capacity(_)) => {
                 if self.reclaim(domain, fault)? == 0 {
                     return Err(Error::Admission(first));
                 }
-                budget.reserve(bytes).map(Some).map_err(Error::Admission)
+                budget
+                    .reserve(crate::memory::MemoryClass::MainKernel, bytes)
+                    .map(Some)
+                    .map_err(Error::Admission)
             }
             Err(other) => Err(Error::Admission(other)),
         }

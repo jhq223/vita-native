@@ -85,7 +85,7 @@ impl Nv12Pool {
                 * (std::mem::size_of::<MemoryBlock>()
                     + std::mem::size_of::<Sealed>()
                     + 2 * std::mem::size_of::<usize>());
-        let metadata = budget.reserve(metadata_bytes as u64)?;
+        let metadata = budget.reserve(crate::memory::MemoryClass::Heap, metadata_bytes as u64)?;
         Ok(Self(Arc::new(PoolInner {
             metadata: Arc::new(Metadata {
                 _ticket: Mutex::new(metadata),

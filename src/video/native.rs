@@ -337,9 +337,12 @@ impl Player {
         // trigger another 64 KiB transport read.
         let metadata = metadata::read(&mut *source, length, &stopped, budget.as_ref())?;
         source.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-        let input_storage = budget.reserve(INPUT_BYTES as u64)?;
+        let input_storage = budget.reserve(crate::memory::MemoryClass::Heap, INPUT_BYTES as u64)?;
         let source = BufReader::with_capacity(INPUT_BYTES, source);
-        let slots = budget.reserve((ALLOCATIONS * size_of::<MemoryBlock>()) as u64)?;
+        let slots = budget.reserve(
+            crate::memory::MemoryClass::Heap,
+            (ALLOCATIONS * size_of::<MemoryBlock>()) as u64,
+        )?;
         let mut blocks = Vec::new();
         blocks
             .try_reserve_exact(ALLOCATIONS)

@@ -62,6 +62,8 @@ measurements include SDK blocking; they do not measure GPU shader execution.
 Builds without this feature erase the timers and return zero timing values.
 Compatible color surfaces share bounded firmware scheduling targets. Configured
 budgets account for kernel capacity, live payload and infrastructure separately.
+Native budget admissions distinguish heap storage, ordinary MAIN kernel blocks and physically contiguous MAIN blocks. Video metadata uses heap admission; each NV12 or codec surface keeps its contiguous allocation reservation until the last reader releases it. The host supplies the limits for these classes without adding their kernel free counters.
+
 The caller supplies an optional shared MAIN block budget at context construction. Every rounded MAIN kernel block retains one reservation until successful physical release; admission pressure first reclaims idle MAIN owners, and failure is reported if no capacity can be reclaimed. CDRAM has its own limits.
 
 Mapped arenas retain recently used blocks within configurable limits: 8 MiB for

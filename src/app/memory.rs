@@ -158,7 +158,11 @@ impl MemoryBlock {
     pub fn allocate(layout: MemoryLayout, budget: &dyn MemoryBudget) -> Result<Self, String> {
         use super::sdk;
         use std::{ffi::c_void, ptr};
-        let reservation = budget.reserve(layout.bytes())?;
+        let class = match layout.kind {
+            MemoryKind::Heap => crate::memory::MemoryClass::Heap,
+            MemoryKind::PhysicalUncached => crate::memory::MemoryClass::ContiguousKernel,
+        };
+        let reservation = budget.reserve(class, layout.bytes())?;
         let (base, block) = match layout.kind {
             MemoryKind::Heap => {
                 unsafe extern "C" {

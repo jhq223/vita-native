@@ -3,7 +3,7 @@
 pub mod layout;
 pub mod memory {
     pub use crate::layout::{MemoryKind, MemoryLayout};
-    pub use vita_native::memory::{MemoryBudget, MemoryReservation};
+    pub use vita_native::memory::{MemoryBudget, MemoryClass, MemoryReservation};
 }
 mod app {
     pub use crate::memory;
@@ -43,6 +43,7 @@ impl Drop for Lease {
 impl memory::MemoryBudget for Budget {
     fn reserve(
         &self,
+        _: vita_native::memory::MemoryClass,
         bytes: u64,
     ) -> Result<Box<dyn memory::MemoryReservation>, vita_native::memory::MemoryBudgetError> {
         if bytes > self.limit {

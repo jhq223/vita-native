@@ -189,11 +189,13 @@ impl Drop for TestTicket {
 impl crate::memory::MemoryBudget for TestBudget {
     fn reserve(
         &self,
+        class: crate::memory::MemoryClass,
         bytes: u64,
     ) -> std::result::Result<
         Box<dyn crate::memory::MemoryReservation>,
         crate::memory::MemoryBudgetError,
     > {
+        assert_eq!(class, crate::memory::MemoryClass::MainKernel);
         let mut state = self.state.lock().unwrap();
         state.calls += 1;
         if state.used + bytes > self.limit {
@@ -245,6 +247,7 @@ struct PermanentBudget;
 impl crate::memory::MemoryBudget for PermanentBudget {
     fn reserve(
         &self,
+        _: crate::memory::MemoryClass,
         _: u64,
     ) -> std::result::Result<
         Box<dyn crate::memory::MemoryReservation>,

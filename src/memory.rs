@@ -21,8 +21,23 @@ impl From<MemoryBudgetError> for String {
     }
 }
 
+/// Physical allocation class used to select the caller's ledger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryClass {
+    /// An allocation within the already reserved process heap.
+    Heap,
+    /// A separately allocated ordinary MAIN kernel block.
+    MainKernel,
+    /// A separately allocated physically contiguous MAIN kernel block.
+    ContiguousKernel,
+}
+
 /// Supplies reservations from the caller's existing physical memory ledger.
 pub trait MemoryBudget: Send + Sync {
     /// Reserve actual rounded bytes before native allocation begins.
-    fn reserve(&self, bytes: u64) -> Result<Box<dyn MemoryReservation>, MemoryBudgetError>;
+    fn reserve(
+        &self,
+        class: MemoryClass,
+        bytes: u64,
+    ) -> Result<Box<dyn MemoryReservation>, MemoryBudgetError>;
 }
