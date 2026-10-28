@@ -7,6 +7,7 @@ use std::{
 
 struct PoolState {
     free: Vec<MemoryBlock>,
+    // Includes physical blocks currently being allocated outside this mutex.
     allocated: usize,
 }
 struct Metadata {
@@ -18,6 +19,18 @@ struct PoolInner {
     layout: Layout,
     blocks: usize,
     metadata: Arc<Metadata>,
+}
+// A reserved slot counts against admission until allocation commits or unwinds.
+struct AllocationSlot<'a> {
+    pool: &'a PoolInner,
+    committed: bool,
+}
+impl Drop for AllocationSlot<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.pool.state.lock().unwrap().allocated -= 1;
+        }
+    }
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Layout {
@@ -86,22 +99,35 @@ impl Nv12Pool {
             blocks,
         })))
     }
-    /// Acquire one exclusively writable block. None means all admitted blocks are
-    /// retained by consumers; the decoder must wait before polling another picture.
+    /// Acquire one exclusively writable block. None means every admitted slot is
+    /// retained by consumers or an in-progress allocation. Allocation and initial
+    /// clearing run outside the recycle lock; failures return the reserved slot.
+    /// The decoder must obtain a block before polling another picture.
     pub fn acquire(&self) -> Result<Option<Nv12Buffer>, String> {
-        let mut state = self.0.state.lock().unwrap();
-        let block = if let Some(block) = state.free.pop() {
+        let available = {
+            let mut state = self.0.state.lock().unwrap();
+            let available = state.free.pop();
+            if available.is_none() {
+                if state.allocated == self.0.blocks {
+                    return Ok(None);
+                }
+                state.allocated += 1;
+            }
+            available
+        };
+        let block = if let Some(block) = available {
             block
         } else {
-            if state.allocated == self.0.blocks {
-                return Ok(None);
-            }
+            let mut slot = AllocationSlot {
+                pool: &self.0,
+                committed: false,
+            };
             let block = MemoryBlock::allocate(self.0.layout.memory()?, self.0.budget.as_ref())?;
             // Plane slices include row padding, which is initialized once.
             unsafe {
                 std::ptr::write_bytes(block.pointer().cast::<u8>(), 0, self.0.layout.bytes);
             }
-            state.allocated += 1;
+            slot.committed = true;
             block
         };
         Ok(Some(Nv12Buffer {

@@ -274,26 +274,8 @@ impl Lease {
         }
     }
 }
-pub(super) struct Completion {
-    pub address: *mut u32,
-    pub value: u32,
-    done: Cell<bool>,
-    leases: RefCell<Vec<Lease>>,
-    staging: usize,
-}
-impl Completion {
-    fn poll(&self) -> bool {
-        if !self.done.get() && unsafe { core::ptr::read_volatile(self.address) } == self.value {
-            self.done.set(true);
-            self.leases.borrow_mut().clear();
-        }
-        self.done.get()
-    }
-}
-struct Flight {
-    slot: usize,
-    token: Rc<Completion>,
-}
+pub(super) type Completion = super::completion::Completion<Lease>;
+type Flight = super::completion::Flight<Lease>;
 pub(super) struct Recording {
     pub target: Framebuffer,
     pub leases: Vec<Lease>,
@@ -324,6 +306,7 @@ pub(super) struct Clear {
     pub color: Uniform,
 }
 pub(super) struct Inner {
+    pub timing: super::timing::Timings,
     pub core: Rc<Core>,
     pub state: RefCell<State>,
     pub screens: RefCell<Vec<Framebuffer>>,
@@ -427,6 +410,7 @@ impl Context {
             imported_video_bytes: Rc::new(Cell::new(0)),
         });
         let context = Self(Rc::new(Inner {
+            timing: super::timing::Timings::default(),
             core,
             state: RefCell::new(State {
                 recording: None,
@@ -465,7 +449,7 @@ impl Context {
                 .0
                 .screens
                 .borrow_mut()
-                .push(context.framebuffer(&t)?);
+                .push(context.create_framebuffer(&t, super::display_sync::SurfaceKind::Display)?);
         }
         let screens = context.0.screens.borrow();
         let t = &screens[0].0.texture;
@@ -539,21 +523,17 @@ impl Context {
             shading_language: "offline GXP / Cg sce_vp_psp2 + sce_fp_psp2".into(),
         })
     }
-    pub(super) fn collect_completions(&self) -> Result<()> {
+    /// Observe each submitted scene/transfer notification without waiting.
+    /// Releases only completed submissions and returns their notification slots.
+    /// Call during the normal event-loop completion phase, before admitting new
+    /// resource work, including while the rendered image remains unchanged.
+    /// Polling one `Fence` observes only that fence's submission.
+    pub fn poll(&self) -> Result<()> {
+        self.check("completion poll")?;
         self.poll_state(&mut self.0.state.borrow_mut())
     }
     pub(super) fn poll_state(&self, s: &mut State) -> Result<()> {
-        let mut i = 0;
-        while i < s.flights.len() {
-            if s.flights[i].token.poll() {
-                self.0.core.fault.check()?;
-                let f = s.flights.remove(i).expect("flight");
-                s.free.push(f.slot);
-            } else {
-                i += 1;
-            }
-        }
-        self.0.core.fault.check()
+        super::completion::collect(&mut s.flights, &mut s.free, || self.0.core.fault.check())
     }
     pub(super) fn reserve_slot(&self, s: &mut State) -> Result<(usize, SceGxmNotification)> {
         self.check("notification admission")?;
@@ -566,7 +546,11 @@ impl Context {
                 value: f.token.value,
             };
             self.command("sceGxmNotificationWait(capacity)", unsafe {
-                sceGxmNotificationWait(&n)
+                self.0
+                    .timing
+                    .measure(super::timing::Call::NotificationCapacityWait, || {
+                        sceGxmNotificationWait(&n)
+                    })
             })?;
             self.poll_state(s)?;
         }
@@ -612,12 +596,17 @@ impl Context {
                 .find(|f| f.token.staging > 0)
                 .expect("pending staging")
                 .token;
-            self.command("sceGxmNotificationWait(upload capacity)", unsafe {
-                sceGxmNotificationWait(&SceGxmNotification {
-                    address: token.address,
-                    value: token.value,
-                })
-            })?;
+            self.command(
+                "sceGxmNotificationWait(upload capacity)",
+                self.0
+                    .timing
+                    .measure(super::timing::Call::UploadCapacityWait, || unsafe {
+                        sceGxmNotificationWait(&SceGxmNotification {
+                            address: token.address,
+                            value: token.value,
+                        })
+                    }),
+            )?;
         }
     }
     pub(super) fn await_allocation(&self, allocation: &Allocation) -> Result<()> {
@@ -640,12 +629,17 @@ impl Context {
                 .find(|f| f.token.leases.borrow().iter().any(|l| l.uses(allocation)))
                 .ok_or(Error::Invalid("allocation has an external native lease"))?
                 .token;
-            self.command("sceGxmNotificationWait(resource replacement)", unsafe {
-                sceGxmNotificationWait(&SceGxmNotification {
-                    address: token.address,
-                    value: token.value,
-                })
-            })?;
+            self.command(
+                "sceGxmNotificationWait(resource replacement)",
+                self.0
+                    .timing
+                    .measure(super::timing::Call::ResourceReplacementWait, || unsafe {
+                        sceGxmNotificationWait(&SceGxmNotification {
+                            address: token.address,
+                            value: token.value,
+                        })
+                    }),
+            )?;
         }
         Ok(())
     }
@@ -683,7 +677,12 @@ impl Context {
             address: unsafe { sceGxmGetNotificationRegion().add(r.slot) },
             value: r.notification,
         };
-        let code = unsafe { sceGxmEndScene(self.0.core.native.context, core::ptr::null(), &n) };
+        let code = self
+            .0
+            .timing
+            .measure(super::timing::Call::SceneEnd, || unsafe {
+                sceGxmEndScene(self.0.core.native.context, core::ptr::null(), &n)
+            });
         if let Err(e) = self.command("sceGxmEndScene", code) {
             core::mem::forget(r);
             return Err(e);
@@ -755,7 +754,7 @@ impl Context {
         let new = &screens[s.screen];
         let old = &screens[s.last_presented];
         self.command("sceGxmPadHeartbeat", unsafe {
-            sceGxmPadHeartbeat(&new.0.surface, new.0.sync)
+            sceGxmPadHeartbeat(&new.0.surface, new.0.sync.raw())
         })?;
         let data = DisplayData {
             base: new.0.texture.0.allocation.ptr(),
@@ -765,21 +764,25 @@ impl Context {
             state: &**self.0.core.native.display,
         };
         self.command("sceGxmDisplayQueueAddEntry", unsafe {
-            sceGxmDisplayQueueAddEntry(old.0.sync, new.0.sync, (&data as *const DisplayData).cast())
+            sceGxmDisplayQueueAddEntry(
+                old.0.sync.raw(),
+                new.0.sync.raw(),
+                (&data as *const DisplayData).cast(),
+            )
         })?;
         s.presents = serial;
         s.last_presented = s.screen;
         s.screen = (s.screen + 1) % screens.len();
         self.check("present completion")
     }
-    /// Native allocator and command counters, separate from renderer payload tickets.
+    /// Snapshot native owners and command counters after the latest completion poll.
+    /// This observes accounting without polling notifications or retiring owners.
     pub fn memory_usage(&self) -> Result<MemoryUsage> {
         self.check("memory accounting")?;
-        self.collect_completions()?;
-        self.check("retired memory accounting")?;
         let s = self.0.state.borrow();
         let n = &self.0.core.native;
         Ok(MemoryUsage {
+            submission_timing: self.0.timing.snapshot(),
             pixels: self.0.core.pixels.usage(),
             buffers: self.0.core.buffers.usage(),
             parameter_cdram_bytes: self.0.core.config.parameter_bytes.into(),
@@ -789,6 +792,13 @@ impl Context {
             render_target_driver_bytes: self.0.core.rt_bytes.get(),
             imported_video_bytes: self.0.core.imported_video_bytes.get(),
             render_targets: self.0.targets.borrow().live_count() as u32,
+            display_sync_objects: self
+                .0
+                .screens
+                .borrow()
+                .iter()
+                .filter(|screen| !screen.0.sync.raw().is_null())
+                .count() as u32,
             display_reserved_bytes: self.0.core.display_pixels.usage().reserved_bytes,
             display_pixel_bytes: self
                 .0

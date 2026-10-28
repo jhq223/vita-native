@@ -10,6 +10,12 @@
 #[cfg(any(target_os = "vita", test))]
 mod bindings;
 #[cfg(any(target_os = "vita", test))]
+mod completion;
+#[cfg(any(target_os = "vita", test))]
+mod display_sync;
+#[cfg(any(target_os = "vita", test))]
+mod fault;
+#[cfg(any(target_os = "vita", test))]
 mod gxp;
 mod layout;
 #[cfg(any(target_os = "vita", test))]
@@ -20,6 +26,8 @@ mod render_targets;
 mod retained;
 #[cfg(any(target_os = "vita", test))]
 mod suballoc;
+#[cfg(any(target_os = "vita", test))]
+mod timing;
 mod types;
 #[cfg(any(target_os = "vita", test))]
 mod uniform_layout;

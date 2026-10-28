@@ -2,6 +2,7 @@
 use super::types::Result;
 use super::{
     device::{BoundProgram, Clear, Lease, Recording},
+    timing::Call,
     *,
 };
 use std::{ops::Range, prelude::v1::*, rc::Rc};
@@ -95,18 +96,20 @@ impl Context {
             xMax: target.size()[0] - 1,
             yMax: target.size()[1] - 1,
         };
-        let code = unsafe {
+        let code = self.0.timing.measure(Call::SceneBegin, || unsafe {
             sceGxmBeginScene(
                 self.0.core.native.context,
                 SCE_GXM_SCENE_FRAGMENT_TRANSFER_SYNC,
                 target.0.target.raw,
                 &region,
                 core::ptr::null_mut(),
-                target.0.sync,
+                // Fragment scenes execute in order; transfer flags above establish
+                // transfer dependencies. This object only gates display queue access.
+                target.0.sync.raw(),
                 &target.0.surface,
                 core::ptr::null(),
             )
-        };
+        });
         let allocation = target.0.texture.0.allocation.clone();
         s.recording = Some(Recording {
             target: target.clone(),
@@ -278,12 +281,16 @@ impl Context {
         let sizes = d.program.0.uniform_sizes;
         if sizes[0] > 0 {
             self.command("reserve vertex uniforms", unsafe {
-                sceGxmReserveVertexDefaultUniformBuffer(c, &mut vertex)
+                self.0.timing.measure(Call::UniformReserve, || {
+                    sceGxmReserveVertexDefaultUniformBuffer(c, &mut vertex)
+                })
             })?;
         }
         if sizes[1] > 0 {
             self.command("reserve fragment uniforms", unsafe {
-                sceGxmReserveFragmentDefaultUniformBuffer(c, &mut fragment)
+                self.0.timing.measure(Call::UniformReserve, || {
+                    sceGxmReserveFragmentDefaultUniformBuffer(c, &mut fragment)
+                })
             })?;
         }
         for u in d.uniforms {
@@ -335,22 +342,25 @@ impl Context {
                 sceGxmSetVertexStream(c, 0, d.vertices.allocation.ptr().cast())
             })?;
         }
-        self.command("sceGxmDraw", unsafe {
-            sceGxmDraw(
-                c,
-                SCE_GXM_PRIMITIVE_TRIANGLES,
-                if index_width == 2 {
-                    SCE_GXM_INDEX_FORMAT_U16
-                } else {
-                    SCE_GXM_INDEX_FORMAT_U32
-                },
-                indices
-                    .ptr()
-                    .cast::<u8>()
-                    .add(d.range.start as usize * index_width)
-                    .cast(),
-                d.range.end - d.range.start,
-            )
-        })
+        self.command(
+            "sceGxmDraw",
+            self.0.timing.measure(Call::Draw, || unsafe {
+                sceGxmDraw(
+                    c,
+                    SCE_GXM_PRIMITIVE_TRIANGLES,
+                    if index_width == 2 {
+                        SCE_GXM_INDEX_FORMAT_U16
+                    } else {
+                        SCE_GXM_INDEX_FORMAT_U32
+                    },
+                    indices
+                        .ptr()
+                        .cast::<u8>()
+                        .add(d.range.start as usize * index_width)
+                        .cast(),
+                    d.range.end - d.range.start,
+                )
+            }),
+        )
     }
 }

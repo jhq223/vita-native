@@ -39,6 +39,15 @@ Textures and buffers own mapped allocations. Scene submissions retain their inpu
 until fragment completion, and display scanout retains its output independently.
 Bound programs remain owned until replaced or unbound. Presentation uses three
 scanout buffers and native queue admission; resource updates wait for their own users.
+Each scanout buffer owns one persistent display sync object (three per context).
+Offscreen surfaces use ordered fragment scenes and fragment/transfer synchronization
+flags; their storage remains leased through completion notifications. Native accounting
+reports display sync object and scheduling target counts separately from bytes.
+The optional `profiling` feature adds fixed cumulative SDK call counts and CPU wall
+times to `MemoryUsage::submission_timing`, separating scene begin/end, uniform
+reservation, draw submission and three explicit notification wait causes. These
+measurements include SDK blocking; they do not measure GPU shader execution.
+Builds without this feature erase the timers and return zero timing values.
 Compatible color surfaces share bounded firmware scheduling targets. Configured
 budgets account for kernel capacity, live payload and infrastructure separately.
 Mapped arenas retain recently used blocks within configurable limits: 8 MiB for
@@ -50,7 +59,11 @@ work keeps its resources until completion.
 
 Create and use a graphics context on one thread. Textures, programs and geometry
 retain their device. Drop caller-owned resources and fences before `Context::close`;
-failed close returns the context so its owners remain available.
+failed close returns the context so its owners remain available. Call `Context::poll`
+in the normal completion phase before admitting new resource work, including on an
+unchanged image. It observes each scene/transfer notification and releases only
+completed submissions. `Fence::poll` observes its own submission;
+`memory_usage` returns the accounting snapshot after the latest completion poll.
 
 Audio owns a dedicated output worker. Its callback fills a preallocated stereo
 slice without allocation, file IO or waiting on the main thread. `pause` drains
@@ -61,8 +74,10 @@ Output polling copies each native picture or PCM block into caller-owned storage
 before AvPlayer can recycle it. Opening waits for native playback readiness; AAC
 frame lengths exclude padding from the PCM clock. `Pending`, `Ready` and `End`
 identify progress. `Nv12Pool` provides bounded output blocks that seal into immutable
-`SharedNv12` storage. GXM imports those blocks for sampling and retains their mapping
-through fragment completion; the final reader returns each block to its pool.
+`SharedNv12` storage. Pool admission counts allocations in progress; physical
+allocation and initial clearing run outside the recycle lock, so completed GPU
+readers can return existing blocks during allocation. GXM imports blocks for
+sampling and retains their mapping through fragment completion; the final reader returns each block to its pool.
 
 ## Building
 

@@ -148,9 +148,38 @@ pub struct ArenaUsage {
     /// Successful kernel block allocations since device creation.
     pub block_allocations: u64,
 }
+/// CPU wall time inside a native SDK call, including any internal blocking.
+/// Values are cumulative since context creation and zero without `profiling`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeCallTiming {
+    /// Number of measured calls, including calls returning a native error.
+    pub calls: u64,
+    /// Total CPU wall time in microseconds; this is not GPU execution time.
+    pub cpu_us: u64,
+}
+/// Fixed native submission attribution. Enabled by the `profiling` feature.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubmissionTiming {
+    /// BeginScene, including scheduling-target admission inside the SDK.
+    pub scene_begin: NativeCallTiming,
+    /// EndScene submission inside the SDK.
+    pub scene_end: NativeCallTiming,
+    /// Vertex and fragment default-uniform reservations inside the SDK.
+    pub uniform_reserve: NativeCallTiming,
+    /// Draw submission inside the SDK, including any ring-buffer pressure.
+    pub draw: NativeCallTiming,
+    /// Explicit notification wait when all completion slots are occupied.
+    pub notification_capacity_wait: NativeCallTiming,
+    /// Explicit notification wait to admit bounded upload staging.
+    pub upload_capacity_wait: NativeCallTiming,
+    /// Explicit notification wait for resource readers before CPU replacement/capture.
+    pub resource_replacement_wait: NativeCallTiming,
+}
 /// Independent native memory domains. Renderer tickets describe their own payloads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemoryUsage {
+    /// Native submission CPU attribution; zero when `profiling` is disabled.
+    pub submission_timing: SubmissionTiming,
     /// Caller texture/target CDRAM arena; excludes scanout and parameter memory.
     pub pixels: ArenaUsage,
     /// Geometry and transfer staging arena; includes upload_staging_bytes.
@@ -170,6 +199,9 @@ pub struct MemoryUsage {
     pub imported_video_bytes: u64,
     /// Live shared firmware targets; scheduling size classes bound this count to 36.
     pub render_targets: u32,
+    /// Live display synchronization objects, one per context-owned scanout buffer.
+    /// Offscreen targets use ordered scenes and fragment completion notifications.
+    pub display_sync_objects: u32,
     /// Scanout payload bytes; a subset of display_reserved_bytes.
     pub display_pixel_bytes: u64,
     /// Actual scanout CDRAM kernel block capacity, separate from pixels.
