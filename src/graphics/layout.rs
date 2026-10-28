@@ -1,6 +1,6 @@
 //! One layout calculation drives mapping, texture views and resource accounting.
-use super::{Error, TextureFormat, types::Result};
-/// Exact single-sample RGBA8 storage including the strided-view row padding.
+use super::{Error, TargetFormat, TextureFormat, types::Result};
+/// Exact single-sample target storage including the strided-view row padding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TargetLayout {
     /// Color payload bytes, including the actual row pitch.
@@ -11,7 +11,7 @@ pub struct TargetLayout {
 /// Target color storage and independently owned firmware scheduling storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TargetFootprint {
-    /// RGBA8 color layout consumed by target planning.
+    /// Format-specific color layout consumed by target planning.
     pub texture: TargetLayout,
     /// Uncached kernel capacity for one shared scheduling class at this extent.
     pub render_target_driver_bytes: Option<u64>,
@@ -30,10 +30,14 @@ pub(crate) fn validate_size(size: [u32; 2]) -> Result<()> {
     }
     Ok(())
 }
-/// Pure RGBA8 render-target layout; color surfaces require a two-pixel stride.
-pub fn target_layout(size: [u32; 2]) -> Result<TargetLayout> {
+/// Render-target layout shared by allocation and planning. Surface pitch is in
+/// pixels; a strided sampled view additionally requires four-byte row alignment.
+pub fn target_layout(size: [u32; 2], format: TargetFormat) -> Result<TargetLayout> {
     validate_size(size)?;
-    let row = (size[0] as u64).next_multiple_of(2) * 4;
+    let row = match format {
+        TargetFormat::Rgba8 => (size[0] as u64).next_multiple_of(2) * 4,
+        TargetFormat::Coverage8 => (size[0] as u64).next_multiple_of(4),
+    };
     Ok(TargetLayout {
         texture_bytes: row * u64::from(size[1]),
         row_stride_bytes: row,
@@ -242,9 +246,18 @@ mod tests {
     #[test]
     fn strided_target_cost_agrees_with_last_pixel_and_row_start() {
         for size in [[1, 1], [3, 7], [960, 544], [4095, 4096]] {
-            let l = target_layout(size).unwrap();
+            let l = target_layout(size, TargetFormat::Rgba8).unwrap();
             assert_eq!(l.row_stride_bytes, (size[0] as u64).next_multiple_of(2) * 4);
             assert_eq!(l.texture_bytes, l.row_stride_bytes * size[1] as u64);
+            let coverage = target_layout(size, TargetFormat::Coverage8).unwrap();
+            assert_eq!(
+                coverage.row_stride_bytes,
+                (size[0] as u64).next_multiple_of(4)
+            );
+            assert_eq!(
+                coverage.texture_bytes,
+                coverage.row_stride_bytes * size[1] as u64
+            );
         }
         let y = texture_layout([3, 3], TextureFormat::Luma8).unwrap();
         let uv = texture_layout([2, 2], TextureFormat::LumaAlpha8).unwrap();

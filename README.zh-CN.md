@@ -52,8 +52,9 @@ vita-native = { git = "https://github.com/jhq223/vita-native", rev = "COMMIT", f
 内核报告物理页不足时，设备回收同一物理域中的空闲缓存；实际释放存储后重试一次。
 保留块继续计入各池的分配额度。
 
-纹理通过 `TextureMemory` 选择 CDRAM 或无 CPU 缓存的 MAIN 内存。渲染目标与扫描输出使用
-CDRAM；应用按容量和带宽需求安排源图片。`MemoryUsage` 分别记录各物理池，默认 CDRAM
+纹理通过 `TextureMemory` 选择 CDRAM 或无 CPU 缓存的 MAIN 内存。渲染目标通过
+`TargetFormat` 选择 RGBA8 或单通道 alpha 覆盖，布局、色表面和采样视图共用格式对应的行距。
+渲染目标与扫描输出使用 CDRAM；应用按容量和带宽需求安排源图片。`MemoryUsage` 分别记录各物理池，默认 CDRAM
 池为参数缓冲和扫描输出预留空间。
 
 ## 所有权与线程

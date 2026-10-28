@@ -37,8 +37,10 @@ programs and binding names. Programs are prepared once and reused by draws.
 `FragmentOutput::Declared` accepts `__nativecolor` programs that own blending and
 the output register format; their draws use replacement mode.
 
-Textures select CDRAM or uncached MAIN through `TextureMemory`. Render targets and
-scanout use CDRAM; applications choose sampled-image placement to balance capacity
+Textures select CDRAM or uncached MAIN through `TextureMemory`. Render targets
+select RGBA8 or single-channel alpha coverage through `TargetFormat`; their strided
+layout, color surface and sampling view share the same format-specific pitch.
+Render targets and scanout use CDRAM; applications choose sampled-image placement to balance capacity
 and bandwidth. `MemoryUsage` reports each physical arena separately. The default
 CDRAM arena leaves capacity for the parameter buffer and scanout.
 

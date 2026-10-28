@@ -108,6 +108,7 @@ pub(super) fn texture_format(f: TextureFormat) -> u32 {
         TextureFormat::Bgra8 => SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ARGB,
         TextureFormat::Rgba16Float => SCE_GXM_TEXTURE_FORMAT_F16F16F16F16_ABGR,
         TextureFormat::Luma8 => SCE_GXM_TEXTURE_FORMAT_U8_1RRR,
+        TextureFormat::Coverage8 => SCE_GXM_TEXTURE_FORMAT_U8_RRRR,
         TextureFormat::LumaAlpha8 => SCE_GXM_TEXTURE_FORMAT_U8U8_GRRR,
         TextureFormat::Bc1Rgb => SCE_GXM_TEXTURE_FORMAT_UBC1_1BGR,
         TextureFormat::Bc3Rgba => SCE_GXM_TEXTURE_FORMAT_UBC3_ABGR,
@@ -132,15 +133,19 @@ impl Context {
     pub fn texture_layout(&self, size: [u32; 2], format: TextureFormat) -> Result<TextureLayout> {
         texture_layout(size, format)
     }
-    /// Tight strided RGBA8 target storage, with the color surface's two-pixel pitch alignment.
-    pub fn target_layout(&self, size: [u32; 2]) -> Result<TargetLayout> {
-        target_layout(size)
+    /// Strided color storage including format-specific surface and texture pitch alignment.
+    pub fn target_layout(&self, size: [u32; 2], format: TargetFormat) -> Result<TargetLayout> {
+        target_layout(size, format)
     }
     /// Query one shared scheduling class with the configured scene capacity.
     /// Color storage retains its exact extent; compatible surfaces share driver bytes.
-    pub fn target_footprint(&self, size: [u32; 2]) -> Result<TargetFootprint> {
+    pub fn target_footprint(
+        &self,
+        size: [u32; 2],
+        format: TargetFormat,
+    ) -> Result<TargetFootprint> {
         self.check("target footprint")?;
-        let texture = self.target_layout(size)?;
+        let texture = self.target_layout(size, format)?;
         let mut bytes = 0;
         sdk("sceGxmGetRenderTargetMemSize", unsafe {
             sceGxmGetRenderTargetMemSize(
@@ -167,7 +172,12 @@ impl Context {
     ) -> Result<Texture> {
         self.check("texture creation")?;
         let l = if strided {
-            let l = self.target_layout(size)?;
+            let target_format = match format {
+                TextureFormat::Rgba8 | TextureFormat::Bgra8 => TargetFormat::Rgba8,
+                TextureFormat::Coverage8 => TargetFormat::Coverage8,
+                _ => return Err(Error::Unsupported("strided target format")),
+            };
+            let l = self.target_layout(size, target_format)?;
             TextureLayout {
                 bytes: l.texture_bytes as usize,
                 row_stride_bytes: l.row_stride_bytes as usize,
@@ -286,10 +296,13 @@ impl Context {
         Ok(())
     }
     /// Allocate the same explicit row pitch reported by `target_layout`.
-    pub fn create_target_texture(&self, size: [u32; 2]) -> Result<Texture> {
+    pub fn create_target_texture(&self, size: [u32; 2], format: TargetFormat) -> Result<Texture> {
         self.allocate_texture(
             size,
-            TextureFormat::Rgba8,
+            match format {
+                TargetFormat::Rgba8 => TextureFormat::Rgba8,
+                TargetFormat::Coverage8 => TextureFormat::Coverage8,
+            },
             true,
             false,
             1,
@@ -567,10 +580,16 @@ impl Context {
         let format = match t.format() {
             TextureFormat::Rgba8 => SCE_GXM_COLOR_FORMAT_A8B8G8R8,
             TextureFormat::Bgra8 => SCE_GXM_COLOR_FORMAT_A8R8G8B8,
+            TextureFormat::Coverage8 => SCE_GXM_COLOR_FORMAT_U8_A,
             _ => return Err(Error::Unsupported("framebuffer color format")),
         };
+        let target_format = if t.format() == TextureFormat::Coverage8 {
+            TargetFormat::Coverage8
+        } else {
+            TargetFormat::Rgba8
+        };
         let bytes = self
-            .target_footprint(t.size())?
+            .target_footprint(t.size(), target_format)?
             .render_target_driver_bytes
             .unwrap();
         if !self.0.targets.borrow().contains(t.size())?
@@ -593,7 +612,7 @@ impl Context {
                 SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT,
                 t.size()[0],
                 t.size()[1],
-                (t.0.layout.row_stride_bytes / 4) as u32,
+                (t.0.layout.row_stride_bytes / t.format().pixel_bytes()) as u32,
                 t.0.allocation.ptr().cast(),
             )
         })?;

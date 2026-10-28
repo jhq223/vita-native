@@ -235,6 +235,15 @@ pub struct MemoryUsage {
     /// Successfully completed display callbacks.
     pub display_flips: u64,
 }
+/// Color surface storage used by render-target admission and allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetFormat {
+    /// Four unsigned normalized color components in byte-order RGBA.
+    Rgba8,
+    /// One unsigned normalized coverage component, written and sampled as alpha.
+    Coverage8,
+}
+
 /// Sample/storage formats. Luma formats retain the GLES `.r` / `.ra` contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextureFormat {
@@ -246,6 +255,8 @@ pub enum TextureFormat {
     Rgba16Float,
     /// One byte replicated to RGB with alpha one.
     Luma8,
+    /// One byte replicated to RGBA, preserving alpha and red coverage consumers.
+    Coverage8,
     /// Two bytes sampled as (R,R,R,G), preserving .ra for NV12 chroma.
     LumaAlpha8,
     /// Portable row-major BC1 blocks, sampled with opaque alpha.
@@ -256,7 +267,7 @@ pub enum TextureFormat {
 impl TextureFormat {
     pub(crate) fn pixel_bytes(self) -> usize {
         match self {
-            Self::Luma8 => 1,
+            Self::Luma8 | Self::Coverage8 => 1,
             Self::LumaAlpha8 => 2,
             Self::Rgba16Float => 8,
             _ => 4,
