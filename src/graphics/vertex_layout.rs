@@ -93,7 +93,7 @@ mod tests {
             })
         );
         assert!(instance_draw(&(8..33), 32, 12, 6).is_none());
-        assert!(instance_draw(&(24..8), 32, 12, 6).is_none());
+        assert!(instance_draw(&(std::ops::Range { start: 24, end: 8 }), 32, 12, 6).is_none());
         assert!(instance_draw(&(0..65536), 65536, 12, 6).is_none());
         assert!(instance_draw(&(0..2), 2, 12, u32::MAX).is_none());
         assert!(instance_draw(&(0..2), 2, 12, 5).is_none());
