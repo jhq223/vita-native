@@ -10,6 +10,10 @@
 #[cfg(any(target_os = "vita", test))]
 mod bindings;
 #[cfg(any(target_os = "vita", test))]
+mod display_sync;
+#[cfg(any(target_os = "vita", test))]
+mod fault;
+#[cfg(any(target_os = "vita", test))]
 mod gxp;
 mod layout;
 #[cfg(any(target_os = "vita", test))]

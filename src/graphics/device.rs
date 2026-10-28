@@ -465,7 +465,7 @@ impl Context {
                 .0
                 .screens
                 .borrow_mut()
-                .push(context.framebuffer(&t)?);
+                .push(context.create_framebuffer(&t, super::display_sync::SurfaceKind::Display)?);
         }
         let screens = context.0.screens.borrow();
         let t = &screens[0].0.texture;
@@ -755,7 +755,7 @@ impl Context {
         let new = &screens[s.screen];
         let old = &screens[s.last_presented];
         self.command("sceGxmPadHeartbeat", unsafe {
-            sceGxmPadHeartbeat(&new.0.surface, new.0.sync)
+            sceGxmPadHeartbeat(&new.0.surface, new.0.sync.raw())
         })?;
         let data = DisplayData {
             base: new.0.texture.0.allocation.ptr(),
@@ -765,7 +765,11 @@ impl Context {
             state: &**self.0.core.native.display,
         };
         self.command("sceGxmDisplayQueueAddEntry", unsafe {
-            sceGxmDisplayQueueAddEntry(old.0.sync, new.0.sync, (&data as *const DisplayData).cast())
+            sceGxmDisplayQueueAddEntry(
+                old.0.sync.raw(),
+                new.0.sync.raw(),
+                (&data as *const DisplayData).cast(),
+            )
         })?;
         s.presents = serial;
         s.last_presented = s.screen;
@@ -789,6 +793,13 @@ impl Context {
             render_target_driver_bytes: self.0.core.rt_bytes.get(),
             imported_video_bytes: self.0.core.imported_video_bytes.get(),
             render_targets: self.0.targets.borrow().live_count() as u32,
+            display_sync_objects: self
+                .0
+                .screens
+                .borrow()
+                .iter()
+                .filter(|screen| !screen.0.sync.raw().is_null())
+                .count() as u32,
             display_reserved_bytes: self.0.core.display_pixels.usage().reserved_bytes,
             display_pixel_bytes: self
                 .0

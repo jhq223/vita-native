@@ -2,6 +2,7 @@
 use super::types::Result;
 use super::{
     device::{Core, Lease},
+    display_sync::{DisplaySync, SurfaceKind},
     memory::{Allocation, sdk},
     render_targets::{self, RenderTarget},
     *,
@@ -51,24 +52,14 @@ impl Texture {
     }
 }
 pub(super) struct FramebufferInner {
+    // Destroy sync first: a cleanup failure must quarantine the following storage.
+    pub sync: DisplaySync,
     /// RGBA8 color layout consumed by target planning.
     pub texture: Texture,
     /// Shared firmware scheduling backing, independent of this color surface.
     pub target: Rc<RenderTarget>,
     pub surface: SceGxmColorSurface,
-    pub sync: *mut SceGxmSyncObject,
     pub owner: Rc<Core>,
-}
-impl Drop for FramebufferInner {
-    fn drop(&mut self) {
-        if self.owner.fault.get().is_some() {
-            return;
-        }
-        // SAFETY: all fragment/display owners have released this surface.
-        let _ = self.owner.fault.command("sceGxmSyncObjectDestroy", unsafe {
-            sceGxmSyncObjectDestroy(self.sync)
-        });
-    }
 }
 /// Render-target scheduling backing plus a sampled view of its color allocation.
 #[derive(Clone)]
@@ -535,8 +526,14 @@ impl Context {
         t.0.raw.set(raw);
         Ok(())
     }
-    /// Bind exact color storage and its sync object to shared firmware scheduling backing.
+    /// Bind offscreen color storage to shared firmware scheduling backing.
+    /// Ordered fragment scenes and transfer flags synchronize GPU access; fragment
+    /// notifications retain storage until completion. Display sync objects belong
+    /// only to the three context-owned scanout buffers.
     pub fn framebuffer(&self, t: &Texture) -> Result<Framebuffer> {
+        self.create_framebuffer(t, SurfaceKind::Offscreen)
+    }
+    pub(super) fn create_framebuffer(&self, t: &Texture, kind: SurfaceKind) -> Result<Framebuffer> {
         self.same(&t.0.owner)?;
         let format = match t.format() {
             TextureFormat::Rgba8 => SCE_GXM_COLOR_FORMAT_A8B8G8R8,
@@ -558,38 +555,21 @@ impl Context {
             RenderTarget::new(&self.0.core, size)
         })?;
         drop(pool);
-        let mut sync = core::ptr::null_mut();
         let mut surface = unsafe { core::mem::zeroed() };
-        let outcome = (|| {
-            sdk("sceGxmSyncObjectCreate", unsafe {
-                sceGxmSyncObjectCreate(&mut sync)
-            })?;
-            sdk("sceGxmColorSurfaceInit", unsafe {
-                sceGxmColorSurfaceInit(
-                    &mut surface,
-                    format,
-                    SCE_GXM_COLOR_SURFACE_LINEAR,
-                    SCE_GXM_COLOR_SURFACE_SCALE_NONE,
-                    SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT,
-                    t.size()[0],
-                    t.size()[1],
-                    (t.0.layout.row_stride_bytes / 4) as u32,
-                    t.0.allocation.ptr().cast(),
-                )
-            })
-        })();
-        if let Err(e) = outcome {
-            if !sync.is_null() {
-                self.0
-                    .core
-                    .fault
-                    .command("sceGxmSyncObjectDestroy(create)", unsafe {
-                        sceGxmSyncObjectDestroy(sync)
-                    })
-                    .ok();
-            }
-            return Err(e);
-        }
+        sdk("sceGxmColorSurfaceInit", unsafe {
+            sceGxmColorSurfaceInit(
+                &mut surface,
+                format,
+                SCE_GXM_COLOR_SURFACE_LINEAR,
+                SCE_GXM_COLOR_SURFACE_SCALE_NONE,
+                SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT,
+                t.size()[0],
+                t.size()[1],
+                (t.0.layout.row_stride_bytes / 4) as u32,
+                t.0.allocation.ptr().cast(),
+            )
+        })?;
+        let sync = DisplaySync::new(kind, &self.0.core.fault)?;
         Ok(Framebuffer(Rc::new(FramebufferInner {
             texture: t.clone(),
             target,

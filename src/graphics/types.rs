@@ -170,6 +170,9 @@ pub struct MemoryUsage {
     pub imported_video_bytes: u64,
     /// Live shared firmware targets; scheduling size classes bound this count to 36.
     pub render_targets: u32,
+    /// Live display synchronization objects, one per context-owned scanout buffer.
+    /// Offscreen targets use ordered scenes and fragment completion notifications.
+    pub display_sync_objects: u32,
     /// Scanout payload bytes; a subset of display_reserved_bytes.
     pub display_pixel_bytes: u64,
     /// Actual scanout CDRAM kernel block capacity, separate from pixels.

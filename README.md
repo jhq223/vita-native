@@ -39,6 +39,11 @@ Textures and buffers own mapped allocations. Scene submissions retain their inpu
 until fragment completion, and display scanout retains its output independently.
 Bound programs remain owned until replaced or unbound. Presentation uses three
 scanout buffers and native queue admission; resource updates wait for their own users.
+Each scanout buffer owns one persistent display sync object (three per context).
+Offscreen surfaces use ordered fragment scenes and fragment/transfer synchronization
+flags; their storage remains leased through completion notifications. Their count
+therefore does not increase native display sync object usage. Native accounting
+reports display sync object and scheduling target counts separately from bytes.
 Compatible color surfaces share bounded firmware scheduling targets. Configured
 budgets account for kernel capacity, live payload and infrastructure separately.
 Mapped arenas retain recently used blocks within configurable limits: 8 MiB for

@@ -102,7 +102,9 @@ impl Context {
                 target.0.target.raw,
                 &region,
                 core::ptr::null_mut(),
-                target.0.sync,
+                // Fragment scenes execute in order; transfer flags above establish
+                // transfer dependencies. This object only gates display queue access.
+                target.0.sync.raw(),
                 &target.0.surface,
                 core::ptr::null(),
             )
