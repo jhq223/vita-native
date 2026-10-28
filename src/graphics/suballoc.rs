@@ -1,5 +1,19 @@
 //! Free intervals shared by native mapped arenas and CPU ownership checks.
 use std::{ops::Range, prelude::v1::*};
+/// Keep the preferred pool quantum when it fits, otherwise use the remaining
+/// whole kernel pages. Admission is based on the minimum aligned request.
+pub(super) fn block_size(
+    bytes: usize,
+    quantum: usize,
+    page: usize,
+    available: u64,
+) -> Option<usize> {
+    let minimum = bytes.checked_next_multiple_of(page)?;
+    let preferred = bytes.max(quantum).checked_next_multiple_of(page)?;
+    let capacity = available / page as u64 * page as u64;
+    (capacity >= minimum as u64).then(|| (preferred as u64).min(capacity) as usize)
+}
+
 pub(super) struct FreeList {
     ranges: Vec<Range<usize>>,
 }
@@ -43,6 +57,16 @@ impl FreeList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pool_quantum_shrinks_to_whole_pages_within_remaining_capacity() {
+        assert_eq!(block_size(32, 65536, 4096, 32768), Some(32768));
+        assert_eq!(block_size(32, 65536, 4096, 1 << 20), Some(65536));
+        assert_eq!(block_size(4097, 65536, 4096, 8191), None);
+        assert_eq!(block_size(4097, 65536, 4096, 8192), Some(8192));
+        assert_eq!(block_size(32, 262144, 262144, 131072), None);
+        assert_eq!(block_size(262145, 262144, 262144, 524288), Some(524288));
+    }
+
     #[test]
     fn many_small_resources_share_one_block_and_free_in_any_order() {
         let mut f = FreeList::new(256 * 1024);

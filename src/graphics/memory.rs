@@ -217,13 +217,12 @@ impl Arena {
                 return Ok(a);
             }
         }
-        let block_bytes = bytes
-            .max(self.quantum)
-            .next_multiple_of(if self.kind == Kind::Cdram {
-                256 * 1024
-            } else {
-                4096
-            });
+        let page = if self.kind == Kind::Cdram {
+            256 * 1024
+        } else {
+            4096
+        };
+        let preferred = bytes.max(self.quantum).next_multiple_of(page);
         let capacity = || {
             blocks
                 .iter()
@@ -231,18 +230,18 @@ impl Arena {
                 .map(|b| b.bytes as u64)
                 .sum::<u64>()
         };
-        if capacity().saturating_add(block_bytes as u64) > self.limit {
+        if capacity().saturating_add(preferred as u64) > self.limit {
             self.release_idle();
             self.fault.check()?;
         }
         let used = capacity();
-        if used + block_bytes as u64 > self.limit {
-            return Err(Error::Budget {
-                domain: self.name,
-                requested: used + block_bytes as u64,
-                limit: self.limit,
-            });
-        }
+        let block_bytes =
+            super::suballoc::block_size(bytes, self.quantum, page, self.limit.saturating_sub(used))
+                .ok_or(Error::Budget {
+                    domain: self.name,
+                    requested: used + bytes.next_multiple_of(page) as u64,
+                    limit: self.limit,
+                })?;
         let block = Block::new(block_bytes, self.kind, &self.fault)?;
         let allocation = block.allocate(bytes, alignment).expect("new aligned block");
         blocks.push(Rc::downgrade(&block));
