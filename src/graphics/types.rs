@@ -28,10 +28,10 @@ pub enum Error {
     Allocation {
         /// Physical domain requested by the block.
         domain: &'static str,
-        /// Rounded contiguous block size requested from the kernel.
+        /// Rounded block size requested from the kernel.
         requested: u64,
-        /// Kernel free bytes after failure, when its query succeeds. Free pages
-        /// can be fragmented and describe total space rather than one extent.
+        /// Kernel free bytes after failure, when its query succeeds. Placement
+        /// constraints depend on the domain and may still reject the request.
         available: Option<u64>,
         /// Domain commitments excluding this failed request; includes other
         /// pending reservations and retained blocks.
