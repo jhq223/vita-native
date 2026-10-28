@@ -168,7 +168,8 @@ pub struct Uniform {
     pub(super) parameters: Vec<Parameter>,
 }
 impl Program {
-    /// Reflect a numeric/default-buffer or fixed TEXUNIT binding once; `[0]` names normalize.
+    /// Reflect a default-buffer numeric or fixed TEXUNIT binding once; `[0]` names normalize.
+    /// Members of explicit uniform buffers return `None`.
     pub fn uniform(&self, name: &str) -> Option<Uniform> {
         let name = CString::new(name.strip_suffix("[0]").unwrap_or(name)).ok()?;
         let mut parameters = Vec::with_capacity(2);
@@ -182,6 +183,12 @@ impl Program {
                 && category != SCE_GXM_PARAMETER_CATEGORY_SAMPLER
             {
                 continue;
+            }
+            if category == SCE_GXM_PARAMETER_CATEGORY_UNIFORM
+                && unsafe { sceGxmProgramParameterGetContainerIndex(raw) }
+                    < SCE_GXM_MAX_UNIFORM_BUFFERS
+            {
+                return None;
             }
             parameters.push(Parameter::reflected(
                 raw,
@@ -309,8 +316,12 @@ impl Context {
                     != SCE_GXM_PARAMETER_CATEGORY_UNIFORM
                 || unsafe { sceGxmProgramParameterGetComponentCount(clip) } != 4
                 || unsafe { sceGxmProgramParameterGetArraySize(clip) } != 1
+                || unsafe { sceGxmProgramParameterGetContainerIndex(clip) }
+                    < SCE_GXM_MAX_UNIFORM_BUFFERS
             {
-                return Err(Error::Invalid("clip uniform must be one float4"));
+                return Err(Error::Invalid(
+                    "clip uniform must be one default-buffer float4",
+                ));
             }
             Some(Parameter::reflected(clip, true, unsafe {
                 sceGxmProgramGetDefaultUniformBufferSize(f.ptr())
