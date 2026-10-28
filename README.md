@@ -34,6 +34,7 @@ for a narrower build. Audio and video enable the host services they use.
 `process-allocator` opts the final executable into a single C/newlib/Rust heap.
 Retain `vita_native_process_heap_anchor` with the linker before CRT startup; call
 `allocator::configure_main_budget` before starting graphics or session/media workers.
+CRT initialization aborts if its kernel mutex or initial arena cannot be created.
 The CRT creates one 1 MiB cached MAIN arena. Small allocations reuse this arena;
 growth obtains independent page-rounded MAIN blocks with their own system
 `sceClibMspace` and kernel UID. The 1 MiB minimum arena size follows the supported
@@ -58,6 +59,15 @@ shared verified code is admitted by each VM but is physically stored once.
 `allocator::stats` reports committed capacity and the original release error.
 The process heap remains available through newlib teardown; final CRT cleanup
 requires application workers and device owners to have finished.
+
+## Memory admission
+
+Native budget admissions distinguish heap storage, ordinary MAIN kernel blocks and physically contiguous MAIN blocks. Video metadata uses heap admission; each NV12 or codec surface keeps its contiguous allocation reservation until the last reader releases it. The host supplies the limits for these classes without adding their kernel free counters.
+
+The caller supplies an optional shared MAIN block budget at context construction. Every rounded MAIN kernel block retains one reservation until successful physical release; admission pressure first reclaims idle MAIN owners, and failure is reported if no capacity can be reclaimed. CDRAM has its own limits.
+
+With `process-allocator`, the caller budget remains a subsystem limit. Physical
+MAIN commitment also competes with CPU arenas in the process ledger.
 
 ## Graphics
 
@@ -98,10 +108,6 @@ measurements include SDK blocking; they do not measure GPU shader execution.
 Builds without this feature erase the timers and return zero timing values.
 Compatible color surfaces share bounded firmware scheduling targets. Configured
 budgets account for kernel capacity, live payload and infrastructure separately.
-Native budget admissions distinguish heap storage, ordinary MAIN kernel blocks and physically contiguous MAIN blocks. Video metadata uses heap admission; each NV12 or codec surface keeps its contiguous allocation reservation until the last reader releases it. The host supplies the limits for these classes without adding their kernel free counters.
-
-The caller supplies an optional shared MAIN block budget at context construction. Every rounded MAIN kernel block retains one reservation until successful physical release; admission pressure first reclaims idle MAIN owners, and failure is reported if no capacity can be reclaimed. CDRAM has its own limits.
-
 Mapped arenas segregate small, medium and whole-block resources. Upload staging
 uses separate blocks; completed uploads cannot leave small staging allocations
 among retained graphics buffers. All classes share the arena's existing capacity

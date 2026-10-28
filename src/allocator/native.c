@@ -391,7 +391,7 @@ void _mstats_r(struct _reent *r, char *s) { (void)s; _malloc_stats_r(r); }
 void mstats(char *s) { _mstats_r(_REENT, s); }
 void __malloc_lock(struct _reent *r) { (void)r; if (lock_heap() < 0) sceClibAbort(); }
 void __malloc_unlock(struct _reent *r) { (void)r; unlock_heap(); }
-void _init_vita_heap(void) { vn_heap_init(); }
+void _init_vita_heap(void) { if (vn_heap_init() < 0) sceClibAbort(); }
 void _free_vita_heap(void) { vn_heap_shutdown(); }
 void _init_vita_malloc(void) {}
 void _free_vita_malloc(void) {}

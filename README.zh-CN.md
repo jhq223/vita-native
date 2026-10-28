@@ -33,6 +33,7 @@ vita-native = { git = "https://github.com/jhq223/vita-native", rev = "COMMIT", f
 `process-allocator` 为最终可执行程序启用统一 C/newlib/Rust 进程堆。
 链接器保留 `vita_native_process_heap_anchor`，使 CRT 启动前接入分配函数；
 应用在启动图形及会话/媒体工作线程前调用 `allocator::configure_main_budget`。
+CRT 无法创建内核互斥锁或初始 arena 时终止启动。
 CRT 创建一个 1 MiB 缓存 MAIN arena，小分配复用已有 arena；增长按页取得独立
 MAIN 块，每块保留自身的 `sceClibMspace` 与内核 UID。1 MiB 最小 arena 尺寸对应 CPU
 支持的页尺寸并摊薄内核分配成本，仅首块保持温热。其余 arena 完全空闲后归还整块。
@@ -49,6 +50,15 @@ MAIN 块，每块保留自身的 `sceClibMspace` 与内核 UID。1 MiB 最小 ar
 堆和 SDK 分配已从该观测扣除。之后的未纳管分配仍可能导致内核分配失败。
 每个 VM 保留本地准入额度，共享验证代码的物理存储保持一次计量。
 `allocator::stats` 返回实际提交容量和原生释放错误。
+
+## 内存准入
+
+原生预算准入区分堆内存、普通 MAIN 内核块和连续物理 MAIN 块。视频元数据使用堆内准入，NV12 和解码表面保持连续块票据直至最后读取者释放；内核各类剩余容量不直接相加。
+
+GXM 上下文可接收调用方共享的 MAIN 内核块预算。页对齐后的块在分配前准入，直到物理释放成功才归还；额度不足时先回收 MAIN 空闲块。CDRAM 沿用独立额度。
+
+启用 `process-allocator` 时，调用方预算保留为子系统额度；实际 MAIN 提交量
+同时与 CPU arena 在进程账本竞争。
 
 ## 图形
 
@@ -133,7 +143,3 @@ cargo fmt --all -- --check
 ## 许可证
 
 [MIT](LICENSE)。
-
-GXM 上下文可接收调用方共享的 MAIN 内核块预算。页对齐后的块在分配前准入，直到物理释放成功才归还；额度不足时先回收 MAIN 空闲块。CDRAM 沿用独立额度。
-
-原生预算准入区分堆内存、普通 MAIN 内核块和连续物理 MAIN 块。视频元数据使用堆内准入，NV12 和解码表面保持连续块票据直至最后读取者释放；内核各类剩余容量不直接相加。
