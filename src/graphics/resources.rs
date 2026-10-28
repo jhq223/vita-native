@@ -342,7 +342,7 @@ impl Context {
         stride: usize,
     ) -> Result<()> {
         self.same(&t.0.owner)?;
-        self.collect_completions()?;
+        self.poll()?;
         let bpp = t.format().pixel_bytes();
         let row = size[0] as usize * bpp;
         if size.contains(&0)
@@ -648,7 +648,7 @@ impl Context {
     /// Replace complete vertices within the original capacity after GPU readers retire.
     pub fn update_vertices(&self, b: &mut VertexBuffer, data: &[f32]) -> Result<()> {
         self.same(&b.owner)?;
-        self.collect_completions()?;
+        self.poll()?;
         if b.allocation.used()
             || !data.len().is_multiple_of(b.stride as usize)
             || core::mem::size_of_val(data) > b.allocation.len()
@@ -670,7 +670,7 @@ impl Context {
         data: &[f32],
     ) -> Result<()> {
         self.same(&b.owner)?;
-        self.collect_completions()?;
+        self.poll()?;
         let stride = b.stride as usize;
         if b.allocation.used()
             || !data.len().is_multiple_of(stride)
@@ -692,7 +692,7 @@ impl Context {
         maximum: u32,
     ) -> Result<()> {
         self.same(&b.owner)?;
-        self.collect_completions()?;
+        self.poll()?;
         if b.width != width
             || b.allocation.used()
             || offset
@@ -745,7 +745,7 @@ impl Context {
         maximum: u32,
     ) -> Result<()> {
         self.same(&b.owner)?;
-        self.collect_completions()?;
+        self.poll()?;
         if b.width != width || b.allocation.used() || data.len() > b.allocation.len() {
             return Err(Error::Invalid(
                 "index replacement extent or active GPU reader",

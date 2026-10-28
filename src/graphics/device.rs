@@ -274,26 +274,8 @@ impl Lease {
         }
     }
 }
-pub(super) struct Completion {
-    pub address: *mut u32,
-    pub value: u32,
-    done: Cell<bool>,
-    leases: RefCell<Vec<Lease>>,
-    staging: usize,
-}
-impl Completion {
-    fn poll(&self) -> bool {
-        if !self.done.get() && unsafe { core::ptr::read_volatile(self.address) } == self.value {
-            self.done.set(true);
-            self.leases.borrow_mut().clear();
-        }
-        self.done.get()
-    }
-}
-struct Flight {
-    slot: usize,
-    token: Rc<Completion>,
-}
+pub(super) type Completion = super::completion::Completion<Lease>;
+type Flight = super::completion::Flight<Lease>;
 pub(super) struct Recording {
     pub target: Framebuffer,
     pub leases: Vec<Lease>,
@@ -541,21 +523,17 @@ impl Context {
             shading_language: "offline GXP / Cg sce_vp_psp2 + sce_fp_psp2".into(),
         })
     }
-    pub(super) fn collect_completions(&self) -> Result<()> {
+    /// Observe each submitted scene/transfer notification without waiting.
+    /// Releases only completed submissions and returns their notification slots.
+    /// Call during the normal event-loop completion phase, before admitting new
+    /// resource work, including while the rendered image remains unchanged.
+    /// Polling one `Fence` observes only that fence's submission.
+    pub fn poll(&self) -> Result<()> {
+        self.check("completion poll")?;
         self.poll_state(&mut self.0.state.borrow_mut())
     }
     pub(super) fn poll_state(&self, s: &mut State) -> Result<()> {
-        let mut i = 0;
-        while i < s.flights.len() {
-            if s.flights[i].token.poll() {
-                self.0.core.fault.check()?;
-                let f = s.flights.remove(i).expect("flight");
-                s.free.push(f.slot);
-            } else {
-                i += 1;
-            }
-        }
-        self.0.core.fault.check()
+        super::completion::collect(&mut s.flights, &mut s.free, || self.0.core.fault.check())
     }
     pub(super) fn reserve_slot(&self, s: &mut State) -> Result<(usize, SceGxmNotification)> {
         self.check("notification admission")?;
@@ -797,11 +775,10 @@ impl Context {
         s.screen = (s.screen + 1) % screens.len();
         self.check("present completion")
     }
-    /// Native allocator and command counters, separate from renderer payload tickets.
+    /// Snapshot native owners and command counters after the latest completion poll.
+    /// This observes accounting without polling notifications or retiring owners.
     pub fn memory_usage(&self) -> Result<MemoryUsage> {
         self.check("memory accounting")?;
-        self.collect_completions()?;
-        self.check("retired memory accounting")?;
         let s = self.0.state.borrow();
         let n = &self.0.core.native;
         Ok(MemoryUsage {

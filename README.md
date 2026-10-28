@@ -59,7 +59,11 @@ work keeps its resources until completion.
 
 Create and use a graphics context on one thread. Textures, programs and geometry
 retain their device. Drop caller-owned resources and fences before `Context::close`;
-failed close returns the context so its owners remain available.
+failed close returns the context so its owners remain available. Call `Context::poll`
+in the normal completion phase before admitting new resource work, including on an
+unchanged image. It observes each scene/transfer notification and releases only
+completed submissions. `Fence::poll` observes its own submission;
+`memory_usage` returns the accounting snapshot after the latest completion poll.
 
 Audio owns a dedicated output worker. Its callback fills a preallocated stereo
 slice without allocation, file IO or waiting on the main thread. `pause` drains
