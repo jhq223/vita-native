@@ -34,6 +34,10 @@ vita-native = { git = "https://github.com/jhq223/vita-native", rev = "COMMIT", f
 `ClearProgram` 描述应用的清空程序及参数名。程序创建后由绘制复用。
 `FragmentOutput::Declared` 接收由 `__nativecolor` 声明输出格式和混合的程序，
 绘制时使用替换模式。
+`ProgramDescriptor::instance` 声明按实例编号读取的第二条 f32 顶点流。
+`Draw::instances` 提供不可变缓冲与范围，基础索引按原顺序为各实例循环。
+每次绘制最多包含 65,535 个实例；两条顶点流和索引存储均保留至片元处理完成。
+普通绘制使用一条索引顶点流。
 
 纹理和缓冲持有映射后的内存。场景提交保留输入资源直到片元处理完成，
 显示扫描单独保留输出。已绑定的程序持有至换绑或解绑；三个扫描缓冲通过原生

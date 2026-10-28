@@ -7,7 +7,7 @@ use super::{
 };
 use std::{ops::Range, prelude::v1::*, rc::Rc};
 use vitasdk_sys::*;
-/// One fully specified direct device draw. Scissor uses top-left x/y/width/height.
+/// Per-instance vertex stream and record range attached to a draw.
 pub struct DrawInstances<'a> {
     /// Immutable stream matching the program's instance layout.
     pub vertices: &'a VertexBuffer,
