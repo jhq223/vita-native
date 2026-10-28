@@ -11,6 +11,7 @@
 mod bindings;
 #[cfg(any(target_os = "vita", test))]
 mod completion;
+mod diagnostics;
 #[cfg(any(target_os = "vita", test))]
 mod display_sync;
 #[cfg(any(target_os = "vita", test))]
@@ -37,6 +38,7 @@ mod types;
 mod uniform_layout;
 #[cfg(any(target_os = "vita", test))]
 mod vertex_layout;
+pub use diagnostics::*;
 pub use layout::{
     MipLayout, TargetFootprint, TargetLayout, TextureLayout, mip_layout, mip_texture_layout,
     target_layout, texture_layout,

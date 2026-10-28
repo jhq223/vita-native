@@ -130,6 +130,8 @@ impl Context {
             slot,
             notification: n.value,
             size,
+            #[cfg(feature = "profiling")]
+            work: super::SceneWork::default(),
         });
         self.command("sceGxmBeginScene", code)?;
         self.0.bindings.borrow_mut().begin_scene();
@@ -407,6 +409,9 @@ impl Context {
                 })?;
             }
         }
+        #[cfg(feature = "profiling")]
+        r.work
+            .draw(instance_draw.map_or(d.range.end - d.range.start, |draw| draw.count));
         self.command(
             if instance_draw.is_some() {
                 "sceGxmDrawInstanced"

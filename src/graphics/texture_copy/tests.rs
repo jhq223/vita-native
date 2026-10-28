@@ -84,6 +84,8 @@ fn retain<T>(owners: Vec<T>, notification: &Cell<u32>, flights: &RefCell<VecDequ
             done: Cell::new(false),
             leases: RefCell::new(owners),
             staging: 0,
+            #[cfg(feature = "profiling")]
+            profile: Default::default(),
         }),
     });
 }

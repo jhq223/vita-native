@@ -116,6 +116,14 @@ The optional `profiling` feature adds fixed cumulative SDK call counts and CPU w
 times to `MemoryUsage::submission_timing`, separating scene begin/end, uniform
 reservation, draw submission and three explicit notification wait causes. These
 measurements include SDK blocking; they do not measure GPU shader execution.
+EndScene samples the caller's kernel execution counter at most once per 100 ms,
+reporting paired wall/execution time, query overhead and original query errors.
+Notification publication and first normal-poll observation remain distinct; unmatched
+counts read notifications without retiring owners. Display-thread flip/vsync waits
+are separate. One latest EndScene sample of at least 1 ms records the shared target,
+notification generation, draw/index/triangle counts and outstanding work before/after
+the call. Counters use fixed storage and existing completion tokens carry their inline
+diagnostics; no additional per-call allocation or GPU work is introduced.
 Builds without this feature erase the timers and return zero timing values.
 Compatible color surfaces share bounded firmware scheduling targets. Configured
 budgets account for kernel capacity, live payload and infrastructure separately.

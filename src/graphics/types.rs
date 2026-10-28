@@ -196,6 +196,14 @@ pub struct SubmissionTiming {
     pub upload_capacity_wait: NativeCallTiming,
     /// Explicit notification wait for resource readers before CPU replacement/capture.
     pub resource_replacement_wait: NativeCallTiming,
+    /// Calling-thread execution and query overhead around EndScene; not GPU time.
+    pub scene_end_thread: super::ThreadRunTiming,
+    /// Shared scheduling-target and bounded slow-call observations.
+    pub scene_queue: super::SceneQueueTiming,
+    /// Token publication and first normal-poll observation, kept distinct.
+    pub notifications: super::NotificationTiming,
+    /// Display-thread flip and vsync waits, independent of EndScene.
+    pub display: super::DisplayTiming,
 }
 /// Physical admission shared by all mapped arenas. MAIN includes CPU arenas
 /// when `process-allocator` is enabled. Counters include pending reservations.

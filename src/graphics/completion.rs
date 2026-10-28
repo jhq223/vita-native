@@ -13,11 +13,22 @@ pub(super) struct Completion<T> {
     pub done: Cell<bool>,
     pub leases: RefCell<Vec<T>>,
     pub staging: usize,
+    #[cfg(feature = "profiling")]
+    pub profile: super::timing::NotificationProfile,
 }
 impl<T> Completion<T> {
+    /// Observe the notification without changing lease ownership or poll counters.
+    #[cfg(feature = "profiling")]
+    pub fn pending(&self) -> bool {
+        // SAFETY: an uncollected submission retains its notification slot. A token
+        // already observed complete skips the address, which may since be reused.
+        !self.done.get() && unsafe { core::ptr::read_volatile(self.address) } != self.value
+    }
     pub fn poll(&self) -> bool {
         if !self.done.get() && unsafe { core::ptr::read_volatile(self.address) } == self.value {
             self.done.set(true);
+            #[cfg(feature = "profiling")]
+            self.profile.observed(super::timing::clock_us());
             self.leases.borrow_mut().clear();
         }
         self.done.get()
@@ -47,6 +58,27 @@ pub(super) fn collect<T>(
         }
     }
     check()
+}
+
+/// Read actual unmatched generations, not the number of uncollected lease owners.
+#[cfg(feature = "profiling")]
+pub(super) fn pending<T>(
+    flights: &VecDeque<Flight<T>>,
+    target_id: u64,
+    now: u64,
+) -> super::PendingNotifications {
+    let mut value = super::PendingNotifications::default();
+    for flight in flights {
+        if flight.token.pending() {
+            value.count += 1;
+            value.same_target +=
+                u32::from(target_id != 0 && flight.token.profile.target_id == target_id);
+            value.oldest_age_us = value
+                .oldest_age_us
+                .max(now.saturating_sub(flight.token.profile.submitted_us));
+        }
+    }
+    value
 }
 
 #[cfg(test)]
@@ -79,7 +111,65 @@ mod tests {
             done: Cell::new(false),
             leases: RefCell::new(leases),
             staging: 0,
+            #[cfg(feature = "profiling")]
+            profile: Default::default(),
         })
+    }
+
+    #[cfg(feature = "profiling")]
+    #[test]
+    fn diagnostics_read_actual_generations_without_retiring_or_reobserving_owners() {
+        let timings = super::super::timing::Timings::default();
+        let memory = Rc::new(RefCell::new(FreeList::new(16)));
+        let notifications = [Cell::new(1), Cell::new(0)];
+        let at = super::super::timing::clock_us();
+        let token = |index: usize| {
+            Rc::new(Completion {
+                address: notifications[index].as_ptr(),
+                value: index as u32 + 1,
+                done: Cell::new(false),
+                leases: RefCell::new(std::vec![allocate(&memory, 8)]),
+                staging: 0,
+                profile: timings.published(7, index as u32 + 1, at),
+            })
+        };
+        let first = token(0);
+        let last = token(1);
+        let mut flights = VecDeque::from([
+            Flight {
+                slot: 0,
+                token: first.clone(),
+            },
+            Flight {
+                slot: 1,
+                token: last.clone(),
+            },
+        ]);
+        let pending = pending(&flights, 7, at + 1000);
+        assert_eq!(
+            (pending.count, pending.same_target, pending.oldest_age_us),
+            (1, 1, 1000)
+        );
+        assert_eq!(memory.borrow().bytes(), 0);
+        assert!(!first.done.get());
+        assert_eq!(timings.snapshot().notifications.observations, 0);
+        collect(&mut flights, &mut Vec::new(), || Ok(())).unwrap();
+        assert_eq!(memory.borrow().bytes(), 8);
+        assert_eq!(timings.snapshot().notifications.observations, 1);
+        assert!(first.poll());
+        assert_eq!(timings.snapshot().notifications.observations, 1);
+        notifications[1].set(2);
+        assert!(last.poll());
+        assert!(last.poll());
+        let measured = timings.snapshot().notifications;
+        assert_eq!(
+            (
+                measured.submissions,
+                measured.observations,
+                measured.last_observed_generation
+            ),
+            (2, 2, 2)
+        );
     }
 
     #[test]
