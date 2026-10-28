@@ -25,6 +25,7 @@ struct DisplayState {
     completed: AtomicU32,
     flips: AtomicU32,
     error: AtomicI32,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 #[repr(C)]
 struct DisplayData {
@@ -69,6 +70,9 @@ unsafe extern "C" fn display_callback(data: *const core::ffi::c_void) {
         state.flips.fetch_add(1, Ordering::Relaxed);
     }
     state.completed.store(d.serial, Ordering::Release);
+    if let Some(wake) = &state.wake {
+        wake();
+    }
 }
 unsafe extern "C" fn host_alloc(_: *mut core::ffi::c_void, size: u32) -> *mut core::ffi::c_void {
     let size = size as usize;
@@ -107,7 +111,11 @@ pub(super) struct Native {
     closed: bool,
 }
 impl Native {
-    fn new(config: Config, fault: &Fault) -> Result<Self> {
+    fn new(
+        config: Config,
+        fault: &Fault,
+        wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Result<Self> {
         if crate::graphics_active::ACTIVE
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
@@ -119,7 +127,10 @@ impl Native {
             patcher: core::ptr::null_mut(),
             host: ManuallyDrop::new(std::vec![0;SCE_GXM_MINIMUM_CONTEXT_HOST_MEM_SIZE as usize/8]),
             blocks: Vec::new(),
-            display: ManuallyDrop::new(Box::default()),
+            display: ManuallyDrop::new(Box::new(DisplayState {
+                wake,
+                ..Default::default()
+            })),
             fault: fault.clone(),
             active: true,
             initialized: false,
@@ -355,10 +366,18 @@ impl Fence {
 impl Context {
     /// Create a GXM device and three process-sized scanout buffers.
     pub fn new(vsync: bool, clear: ClearProgram<'_>) -> Result<Self> {
-        Self::with_config(Config::default(), vsync, clear)
+        Self::with_config(Config::default(), vsync, clear, None)
     }
-    /// Select explicit infrastructure and render-target scheduling budgets.
-    pub fn with_config(config: Config, vsync: bool, clear: ClearProgram<'_>) -> Result<Self> {
+    /// Select infrastructure budgets and an optional display-completion wake callback.
+    /// The callback runs after completion is published, including display errors.
+    /// It must return promptly without panicking or issuing graphics commands.
+    /// The device owns it until all display callbacks have finished during close.
+    pub fn with_config(
+        config: Config,
+        vsync: bool,
+        clear: ClearProgram<'_>,
+        wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Result<Self> {
         // Sony gxm/defs.h: SCE_GXM_MAX_SCENES_PER_RENDERTARGET (absent from VitaSDK bindings).
         if config.scenes_per_frame == 0
             || config.scenes_per_frame > 8
@@ -377,7 +396,7 @@ impl Context {
             return Err(Error::Invalid("GXM configuration"));
         }
         let fault = Fault::default();
-        let native = Native::new(config, &fault)?;
+        let native = Native::new(config, &fault, wake)?;
         let core = Rc::new(Core {
             native,
             pixels: Arena::new(

@@ -39,6 +39,9 @@ Textures and buffers own mapped allocations. Scene submissions retain their inpu
 until fragment completion, and display scanout retains its output independently.
 Bound programs remain owned until replaced or unbound. Presentation uses three
 scanout buffers and native queue admission; resource updates wait for their own users.
+`Context::with_config` accepts a display-completion wake callback. It runs on the
+display thread after completion is published and only signals the application.
+The device retains it until the display queue has drained during close.
 Each scanout buffer owns one persistent display sync object (three per context).
 Offscreen surfaces use ordered fragment scenes and fragment/transfer synchronization
 flags; their storage remains leased through completion notifications. Native accounting
