@@ -89,8 +89,12 @@ completed submissions. `Fence::poll` observes its own submission;
 `memory_usage` returns the accounting snapshot after the latest completion poll.
 
 Audio owns a dedicated output worker. Its callback fills a preallocated stereo
-slice without allocation, file IO or waiting on the main thread. `pause` drains
-submitted PCM before acknowledging; `stop` joins the worker and releases the port.
+slice without allocation, file IO or waiting on the main thread. `play` and
+`pause` publish retained worker requests without waiting for native output or
+drain. `state` distinguishes a pending request from the current generation's
+worker acknowledgement; `Paused` confirms that previously submitted PCM drained.
+The worker retains both native blocks throughout that transition. `stop` joins
+the worker and releases the port.
 
 Video owns a seekable input and an allocation budget supplied by the application.
 Output polling copies each native picture or PCM block into caller-owned storage

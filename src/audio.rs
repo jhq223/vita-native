@@ -4,21 +4,36 @@ use std::{
     prelude::v1::*,
     sync::{
         Arc,
-        atomic::{AtomicI32, AtomicU8, Ordering},
+        atomic::{AtomicI32, AtomicU32, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
-    time::Duration,
 };
 
 /// AudioOut main-port sample rate in Hz.
 pub const SAMPLE_RATE: u32 = 48_000;
 /// Frames per native stereo block; two aligned blocks remain owned until drain.
 pub const BLOCK_FRAMES: usize = 512;
-const STOP: u8 = 0;
-const PAUSED: u8 = 1;
-const RUNNING: u8 = 2;
-const FAILED: u8 = 3;
+const STOP: u32 = 0;
+const PAUSED: u32 = 1;
+const RUNNING: u32 = 2;
+const KIND: u32 = 3;
+/// Progress of the latest control request; this does not measure presentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamState {
+    /// Play was requested; the worker has not observed this request generation.
+    Starting,
+    /// The worker observed the latest play request and can invoke its callback.
+    Running,
+    /// Pause was requested; previously submitted PCM is still retained.
+    Draining,
+    /// The worker confirmed this pause after all previously submitted PCM drained.
+    Paused,
+    /// Shutdown has not yet released the worker and native port.
+    Stopping,
+    /// The worker and native port have both been released.
+    Closed,
+}
 #[repr(align(64))]
 struct Block([i16; BLOCK_FRAMES * 2]);
 struct Resources {
@@ -62,11 +77,11 @@ impl Drop for Resources {
     }
 }
 struct Control {
-    desired: AtomicU8,
-    acknowledged: AtomicU8,
+    // Low bits select the state; upper bits identify its request generation.
+    desired: AtomicU32,
+    acknowledged: AtomicU32,
     error: AtomicI32,
     wake: Arc<Wake>,
-    ack: Arc<Wake>,
 }
 /// One native output worker. The callback owns no device handles, and only runs
 /// after play acceptance. It must fill the fixed slice without allocation or IO.
@@ -85,11 +100,10 @@ impl Stream {
         fault: impl Fn(Error) + Send + 'static,
     ) -> Result<Self, Error> {
         let control = Arc::new(Control {
-            desired: AtomicU8::new(PAUSED),
-            acknowledged: AtomicU8::new(PAUSED),
+            desired: AtomicU32::new(PAUSED),
+            acknowledged: AtomicU32::new(PAUSED),
             error: AtomicI32::new(0),
             wake: Wake::new()?,
-            ack: Wake::new()?,
         });
         let state = control.clone();
         let buffers = Box::new([Block([0; BLOCK_FRAMES * 2]), Block([0; BLOCK_FRAMES * 2])]);
@@ -149,7 +163,7 @@ impl Stream {
                 let mut index = 0;
                 loop {
                     let desired = state.desired.load(Ordering::Acquire);
-                    if desired != RUNNING {
+                    if desired & KIND != RUNNING {
                         if active {
                             // SAFETY: drain while both retained buffers are still alive.
                             let result = unsafe { sdk::sceAudioOutOutput(port, std::ptr::null()) };
@@ -160,15 +174,12 @@ impl Stream {
                                 };
                                 state.error.store(result, Ordering::Release);
                                 fault(error);
-                                state.acknowledged.store(FAILED, Ordering::Release);
-                                let _ = state.ack.signal();
                                 break;
                             }
                             active = false;
                         }
                         state.acknowledged.store(desired, Ordering::Release);
-                        let _ = state.ack.signal();
-                        if desired == STOP {
+                        if desired & KIND == STOP {
                             break;
                         }
                         if let Err(error) = state.wake.wait(None) {
@@ -179,9 +190,7 @@ impl Stream {
                         continue;
                     }
                     active = true;
-                    if state.acknowledged.swap(RUNNING, Ordering::AcqRel) != RUNNING {
-                        let _ = state.ack.signal();
-                    }
+                    state.acknowledged.store(desired, Ordering::Release);
                     let buffers = resources
                         .buffers
                         .as_mut()
@@ -229,46 +238,80 @@ impl Stream {
             }
         }
     }
-    fn request(&self, state: u8) -> Result<(), Error> {
-        if self.worker.is_none() {
+    fn request(&self, state: u32) -> Result<(), Error> {
+        let error = self.control.error.load(Ordering::Acquire);
+        if error != 0 {
             return Err(Error {
-                operation: "AudioOut stream closed",
+                operation: "AudioOut worker",
+                code: error,
+            });
+        }
+        if self.worker.as_ref().is_none_or(JoinHandle::is_finished) {
+            return Err(Error {
+                operation: "AudioOut worker ended",
                 code: -1,
             });
         }
-        if self.control.error.load(Ordering::Acquire) != 0 {
+        let previous = self.control.desired.load(Ordering::Acquire);
+        if previous & KIND == STOP {
             return Err(Error {
-                operation: "AudioOut worker",
-                code: self.control.error.load(Ordering::Acquire),
+                operation: "AudioOut stream closing",
+                code: -1,
             });
         }
-        self.control.desired.store(state, Ordering::Release);
-        self.control.wake.signal()?;
-        while self.control.acknowledged.load(Ordering::Acquire) != state {
-            if self.worker.as_ref().is_some_and(JoinHandle::is_finished) {
-                return Err(Error {
-                    operation: "AudioOut worker ended",
-                    code: -1,
-                });
-            }
-            let error = self.control.error.load(Ordering::Acquire);
-            if error != 0 {
-                return Err(Error {
-                    operation: "AudioOut worker",
-                    code: error,
-                });
-            }
-            self.control.ack.wait(Some(Duration::from_millis(100)))?;
+        if previous & KIND != state {
+            self.control.desired.store(
+                (previous.wrapping_add(4) & !KIND) | state,
+                Ordering::Release,
+            );
+            self.control.wake.signal()?;
         }
         Ok(())
     }
-    /// Start callback processing with the format established when the port opened.
+    /// Request callback processing without waiting for the output worker. A
+    /// pending drain completes before the worker observes the new play request.
+    /// Serialize control operations on the owning thread and observe `state` for
+    /// this generation's acknowledgement. Asynchronous faults use `fault` too.
     pub fn play(&self) -> Result<(), Error> {
         self.request(RUNNING)
     }
-    /// Return only after the callback has stopped and all previous PCM drained.
+    /// Close playback on the worker without waiting for native drain. Both PCM
+    /// buffers remain owned until `state` confirms Paused or shutdown completes.
+    /// The application must close its own callback-entry gate before this call
+    /// when it requires immediate prevention of further fill invocations.
     pub fn pause(&self) -> Result<(), Error> {
         self.request(PAUSED)
+    }
+    /// Observe the latest request without waiting. A stale Running/Paused
+    /// acknowledgement cannot complete a later request of the same kind.
+    pub fn state(&self) -> Result<StreamState, Error> {
+        if self.worker.is_none() && self.retired.is_none() {
+            return Ok(StreamState::Closed);
+        }
+        let error = self.control.error.load(Ordering::Acquire);
+        if error != 0 {
+            return Err(Error {
+                operation: "AudioOut worker",
+                code: error,
+            });
+        }
+        let requested = self.control.desired.load(Ordering::Acquire);
+        if requested & KIND == STOP {
+            return Ok(StreamState::Stopping);
+        }
+        if self.worker.as_ref().is_some_and(JoinHandle::is_finished) {
+            return Err(Error {
+                operation: "AudioOut worker ended",
+                code: -1,
+            });
+        }
+        let complete = requested == self.control.acknowledged.load(Ordering::Acquire);
+        Ok(match (requested & KIND, complete) {
+            (RUNNING, true) => StreamState::Running,
+            (RUNNING, false) => StreamState::Starting,
+            (_, true) => StreamState::Paused,
+            (_, false) => StreamState::Draining,
+        })
     }
     /// Stop the worker, then release the native port. A failed release retains the
     /// buffers in this stream; the owner may retry stop without restarting fill.
