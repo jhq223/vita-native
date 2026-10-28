@@ -114,6 +114,7 @@ impl Native {
     fn new(
         config: Config,
         fault: &Fault,
+        pressure: &super::pressure::Pressure,
         wake: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> Result<Self> {
         if crate::graphics_active::ACTIVE
@@ -154,7 +155,8 @@ impl Native {
             (config.patcher_vertex_usse_bytes, Kind::VertexUsse),
             (config.patcher_fragment_usse_bytes, Kind::FragmentUsse),
         ] {
-            n.blocks.push(Block::new(bytes as usize, kind, fault)?);
+            n.blocks
+                .push(Block::new(bytes as usize, kind, fault, pressure)?);
         }
         let b = &n.blocks;
         let params = SceGxmContextParams {
@@ -258,6 +260,7 @@ impl Drop for Native {
     }
 }
 pub(super) struct Core {
+    pub pressure: super::pressure::Pressure,
     pub pixels: Arena,
     pub main_textures: Arena,
     pub display_pixels: Arena,
@@ -322,7 +325,7 @@ pub(super) struct Inner {
     pub core: Rc<Core>,
     pub state: RefCell<State>,
     pub screens: RefCell<Vec<Framebuffer>>,
-    pub targets: RefCell<super::render_targets::Pool<super::render_targets::RenderTarget>>,
+    pub targets: Rc<RefCell<super::render_targets::Pool<super::render_targets::RenderTarget>>>,
     #[cfg(feature = "video")]
     pub video_imports: RefCell<Vec<std::rc::Weak<super::video::Import>>>,
     pub vsync: Cell<bool>,
@@ -397,13 +400,21 @@ impl Context {
             return Err(Error::Invalid("GXM configuration"));
         }
         let fault = Fault::default();
-        let native = Native::new(config, &fault, wake)?;
+        let pressure = super::pressure::Pressure::default();
+        let native = Native::new(config, &fault, &pressure, wake)?;
+        let targets = Rc::new(RefCell::new(super::render_targets::Pool::new(
+            config
+                .render_target_retained_bytes
+                .min(config.render_target_bytes),
+        )));
+        pressure.register(super::pressure::Domain::Main, &targets);
         let core = Rc::new(Core {
             native,
             pixels: Arena::new(
                 "native CDRAM pixels",
                 Kind::Cdram,
                 &fault,
+                &pressure,
                 config.pixel_arena_bytes,
                 config.pixel_retained_bytes,
             ),
@@ -411,18 +422,28 @@ impl Context {
                 "native MAIN textures",
                 Kind::Uncached,
                 &fault,
+                &pressure,
                 config.main_texture_arena_bytes,
                 config.main_texture_retained_bytes,
             ),
-            display_pixels: Arena::new("native scanout", Kind::Cdram, &fault, 8 * 1024 * 1024, 0),
+            display_pixels: Arena::new(
+                "native scanout",
+                Kind::Cdram,
+                &fault,
+                &pressure,
+                8 * 1024 * 1024,
+                0,
+            ),
             buffers: Arena::new(
                 "native buffers",
                 Kind::Uncached,
                 &fault,
+                &pressure,
                 config.buffer_arena_bytes,
                 config.buffer_retained_bytes,
             ),
             fault,
+            pressure,
             config,
             caps: Capabilities {
                 max_texture_size: 4096,
@@ -457,11 +478,7 @@ impl Context {
             screens: RefCell::new(Vec::new()),
             #[cfg(feature = "video")]
             video_imports: RefCell::new(Vec::new()),
-            targets: RefCell::new(super::render_targets::Pool::new(
-                config
-                    .render_target_retained_bytes
-                    .min(config.render_target_bytes),
-            )),
+            targets,
             vsync: Cell::new(vsync),
             clear: RefCell::new(None),
             bound_program: RefCell::new(None),
@@ -871,7 +888,7 @@ impl Context {
         let inner = Rc::get_mut(&mut self.0).expect("unique context");
         inner.clear.get_mut().take();
         inner.screens.get_mut().clear();
-        inner.targets.get_mut().clear();
+        inner.targets.borrow_mut().clear();
         inner.identity.get_mut().take();
         inner.state.get_mut().last = None;
         let core = Rc::get_mut(&mut inner.core).expect("all external device owners released");

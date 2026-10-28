@@ -573,17 +573,16 @@ impl Context {
             .target_footprint(t.size())?
             .render_target_driver_bytes
             .unwrap();
-        let mut pool = self.0.targets.borrow_mut();
-        if !pool.contains(t.size())?
+        if !self.0.targets.borrow().contains(t.size())?
             && self.0.core.rt_bytes.get().saturating_add(bytes)
                 > self.0.core.config.render_target_bytes
         {
-            pool.release_idle();
+            self.0.targets.borrow_mut().release_idle();
         }
-        let target = pool.get_or_create(t.size(), bytes, |size| {
-            RenderTarget::new(&self.0.core, size)
-        })?;
-        drop(pool);
+        let target =
+            super::render_targets::Pool::get_or_create(&self.0.targets, t.size(), bytes, |size| {
+                RenderTarget::new(&self.0.core, size)
+            })?;
         let mut surface = unsafe { core::mem::zeroed() };
         sdk("sceGxmColorSurfaceInit", unsafe {
             sceGxmColorSurfaceInit(

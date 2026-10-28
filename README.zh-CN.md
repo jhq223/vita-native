@@ -49,6 +49,8 @@ vita-native = { git = "https://github.com/jhq223/vita-native", rev = "COMMIT", f
 内核分配容量、有效载荷和设备基础存储分别计量。映射 arena 按可配置额度保留
 近期使用的块，默认像素 8 MiB、缓冲 1 MiB。固件调度目标的总额度为 16 MiB，
 其中最多保留 4 MiB 供复用。分配压力释放空闲所有者，已提交工作持有资源至完成。
+内核报告物理页不足时，设备回收同一物理域中的空闲缓存；实际释放存储后重试一次。
+保留块继续计入各池的分配额度。
 
 纹理通过 `TextureMemory` 选择 CDRAM 或无 CPU 缓存的 MAIN 内存。渲染目标与扫描输出使用
 CDRAM；应用按容量和带宽需求安排源图片。`MemoryUsage` 分别记录各物理池，默认 CDRAM

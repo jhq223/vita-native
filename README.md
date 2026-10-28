@@ -63,7 +63,9 @@ budgets account for kernel capacity, live payload and infrastructure separately.
 Mapped arenas retain recently used blocks within configurable limits: 8 MiB for
 pixels and 1 MiB for buffers by default. Scheduling targets retain up to 4 MiB
 within their 16 MiB total limit. Allocation pressure releases idle owners; submitted
-work keeps its resources until completion.
+work keeps its resources until completion. When kernel allocation reports exhausted
+physical pages, the device releases idle caches in that physical domain and retries
+once if storage was released. Allocation limits continue to include retained blocks.
 
 ## Ownership and threads
 

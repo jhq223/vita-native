@@ -148,13 +148,12 @@ fn allocation_boundary() -> Result<(), String> {
     }
     Ok(())
 }
-fn pause_next_acquire(
-    pool: Arc<Nv12Pool>,
-) -> (
+type PausedAcquire = (
     std::sync::mpsc::Receiver<()>,
     std::sync::mpsc::Sender<bool>,
     std::thread::JoinHandle<Result<Option<Nv12Buffer>, String>>,
-) {
+);
+fn pause_next_acquire(pool: Arc<Nv12Pool>) -> PausedAcquire {
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (resume_tx, resume_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {

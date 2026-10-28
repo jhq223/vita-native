@@ -1,5 +1,6 @@
 //! Owned kernel blocks and coalescing GPU suballocations.
 pub(super) use super::fault::{Fault, sdk};
+use super::pressure::{Domain, Pressure};
 use super::suballoc::FreeList;
 use super::{ArenaUsage, Error, types::Result};
 use std::{
@@ -18,6 +19,15 @@ pub(super) enum Kind {
     FragmentUsse,
     Driver,
 }
+impl Kind {
+    fn domain(self) -> Domain {
+        if self == Self::Cdram {
+            Domain::Cdram
+        } else {
+            Domain::Main
+        }
+    }
+}
 pub(super) struct Block {
     pub base: *mut c_void,
     pub bytes: usize,
@@ -28,7 +38,7 @@ pub(super) struct Block {
     free: RefCell<FreeList>,
 }
 impl Block {
-    pub fn new(bytes: usize, kind: Kind, fault: &Fault) -> Result<Rc<Self>> {
+    pub fn new(bytes: usize, kind: Kind, fault: &Fault, pressure: &Pressure) -> Result<Rc<Self>> {
         fault.check()?;
         let alignment = if kind == Kind::Cdram {
             256 * 1024
@@ -44,15 +54,14 @@ impl Block {
         } else {
             SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE
         };
-        let uid = unsafe {
+        let uid = pressure.allocate(kind.domain(), fault, || unsafe {
             sceKernelAllocMemBlock(
                 c"VitaGraphics".as_ptr(),
                 ty,
                 bytes as u32,
                 core::ptr::null_mut(),
             )
-        };
-        sdk("sceKernelAllocMemBlock", uid)?;
+        })?;
         let mut block = Self {
             base: core::ptr::null_mut(),
             bytes,
@@ -182,13 +191,25 @@ pub(super) struct Arena {
     kind: Kind,
     quantum: usize,
     blocks: RefCell<Vec<Weak<Block>>>,
-    warm: RefCell<super::retained::Retained<Block>>,
+    warm: Rc<RefCell<super::retained::Retained<Block>>>,
+    pressure: Pressure,
     block_allocations: Cell<u64>,
     fault: Fault,
     limit: u64,
 }
 impl Arena {
-    pub fn new(name: &'static str, kind: Kind, fault: &Fault, limit: u64, retained: u64) -> Self {
+    pub fn new(
+        name: &'static str,
+        kind: Kind,
+        fault: &Fault,
+        pressure: &Pressure,
+        limit: u64,
+        retained: u64,
+    ) -> Self {
+        let warm = Rc::new(RefCell::new(super::retained::Retained::new(
+            retained.min(limit),
+        )));
+        pressure.register(kind.domain(), &warm);
         Self {
             name,
             kind,
@@ -198,7 +219,8 @@ impl Arena {
                 64 * 1024
             },
             blocks: RefCell::new(Vec::new()),
-            warm: RefCell::new(super::retained::Retained::new(retained.min(limit))),
+            warm,
+            pressure: pressure.clone(),
             block_allocations: Cell::new(0),
             fault: fault.clone(),
             limit,
@@ -242,7 +264,7 @@ impl Arena {
                     requested: used + bytes.next_multiple_of(page) as u64,
                     limit: self.limit,
                 })?;
-        let block = Block::new(block_bytes, self.kind, &self.fault)?;
+        let block = Block::new(block_bytes, self.kind, &self.fault, &self.pressure)?;
         let allocation = block.allocate(bytes, alignment).expect("new aligned block");
         blocks.push(Rc::downgrade(&block));
         self.block_allocations.set(self.block_allocations.get() + 1);
