@@ -291,9 +291,7 @@ impl Context {
         }
         if let Some(parameter) = d.program.0.clip {
             let clip = [min[0] as f32, min[1] as f32, max[0] as f32, max[1] as f32];
-            self.command("exact fragment clip", unsafe {
-                sceGxmSetUniformDataF(fragment, parameter, 0, 4, clip.as_ptr())
-            })?;
+            parameter.upload(&clip, vertex, fragment)?;
         }
         for (unit, t) in d.textures.iter().enumerate() {
             let mut raw = t.0.raw.get();
