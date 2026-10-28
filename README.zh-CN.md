@@ -60,7 +60,9 @@ vita-native = { git = "https://github.com/jhq223/vita-native", rev = "COMMIT", f
 输出轮询在 AvPlayer 回收数据前，将画面或 PCM 复制到调用方存储。
 打开操作等待原生播放就绪；PCM 按 AAC 帧长读取有效采样，缓冲填充不计入播放时钟。
 `Pending`、`Ready` 和 `End` 分别表示等待、取得数据和结束。
-`Nv12Pool` 提供有界输出块，封存后成为只读的 `SharedNv12`。GXM 导入该存储用于采样，
+`Nv12Pool` 提供有界输出块，封存后成为只读的 `SharedNv12`。容量准入包含正在分配的名额；
+物理分配和初次清零在回收锁外执行，已完成的 GPU 读者可在分配期间归还原有块。
+GXM 导入该存储用于采样，
 保留映射至片元处理完成；最后一个读者释放后，存储回到原池。
 
 ## 构建

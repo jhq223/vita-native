@@ -70,8 +70,10 @@ Output polling copies each native picture or PCM block into caller-owned storage
 before AvPlayer can recycle it. Opening waits for native playback readiness; AAC
 frame lengths exclude padding from the PCM clock. `Pending`, `Ready` and `End`
 identify progress. `Nv12Pool` provides bounded output blocks that seal into immutable
-`SharedNv12` storage. GXM imports those blocks for sampling and retains their mapping
-through fragment completion; the final reader returns each block to its pool.
+`SharedNv12` storage. Pool admission counts allocations in progress; physical
+allocation and initial clearing run outside the recycle lock, so completed GPU
+readers can return existing blocks during allocation. GXM imports blocks for
+sampling and retains their mapping through fragment completion; the final reader returns each block to its pool.
 
 ## Building
 
