@@ -56,6 +56,12 @@ int vn_main_reserve(uint32_t bytes) {
 void vn_main_refund(uint32_t bytes) {
     atomic_fetch_sub_explicit(&main_committed, bytes, memory_order_acq_rel);
 }
+uint32_t vn_main_capacity(void) {
+    return atomic_load_explicit(&main_limit, memory_order_acquire);
+}
+uint32_t vn_main_committed(void) {
+    return atomic_load_explicit(&main_committed, memory_order_acquire);
+}
 static int lock_heap(void) {
     int code = sceKernelLockLwMutex(&heap_mutex, 1, NULL);
     if (code < 0) last_error = code;

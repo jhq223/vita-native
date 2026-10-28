@@ -592,12 +592,6 @@ impl Context {
             .target_footprint(t.size(), target_format)?
             .render_target_driver_bytes
             .unwrap();
-        if !self.0.targets.borrow().contains(t.size())?
-            && self.0.core.rt_bytes.get().saturating_add(bytes)
-                > self.0.core.config.render_target_bytes
-        {
-            self.0.targets.borrow_mut().release_idle();
-        }
         let target =
             super::render_targets::Pool::get_or_create(&self.0.targets, t.size(), bytes, |size| {
                 RenderTarget::new(&self.0.core, size)

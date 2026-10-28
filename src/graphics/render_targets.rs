@@ -35,6 +35,7 @@ impl<T> Pool<T> {
             retained: super::retained::Retained::new(retained_bytes),
         }
     }
+    #[cfg(test)]
     pub fn contains(&self, size: [u32; 2]) -> Result<bool> {
         Ok(self.slots[index(extent(size)?)].strong_count() != 0)
     }
@@ -98,15 +99,6 @@ impl RenderTarget {
         sdk("sceGxmGetRenderTargetMemSize", unsafe {
             sceGxmGetRenderTargetMemSize(&params, &mut bytes)
         })?;
-        let capacity = u64::from(bytes).next_multiple_of(4096);
-        let requested = owner.rt_bytes.get().saturating_add(capacity);
-        if requested > owner.config.render_target_bytes {
-            return Err(super::Error::Budget {
-                domain: "native scheduling targets",
-                requested,
-                limit: owner.config.render_target_bytes,
-            });
-        }
         let driver = Block::new(bytes as usize, Kind::Driver, &owner.fault, &owner.pressure)?;
         params.driverMemBlock = driver.uid;
         let mut raw = core::ptr::null_mut();

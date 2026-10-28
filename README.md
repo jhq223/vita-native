@@ -64,7 +64,15 @@ requires application workers and device owners to have finished.
 
 Native budget admissions distinguish heap storage, ordinary MAIN kernel blocks and physically contiguous MAIN blocks. Video metadata uses heap admission; each NV12 or codec surface keeps its contiguous allocation reservation until the last reader releases it. The host supplies the limits for these classes without adding their kernel free counters.
 
-The caller supplies an optional shared MAIN block budget at context construction. Every rounded MAIN kernel block retains one reservation until successful physical release; admission pressure first reclaims idle MAIN owners, and failure is reported if no capacity can be reclaimed. CDRAM has its own limits.
+Native arenas share one physical admission domain for MAIN and one for CDRAM.
+The CDRAM capacity is observed after libgxm initialization, so parameter-buffer
+storage has already been deducted. Scanout, glyphs and render targets then compete
+for that capacity. Arena separation controls lifetime and fragmentation; active allocations share
+physical capacity and idle retention values set soft cache targets.
+Every rounded block holds its charge until successful physical release. Pressure
+reclaims only idle owners in the requested domain, then retries after real release.
+The optional caller MAIN budget can impose an additional application quota.
+`Context::memory_state` reads physical commitment counters in constant time.
 
 With `process-allocator`, the caller budget remains a subsystem limit. Physical
 MAIN commitment also competes with CPU arenas in the process ledger.
@@ -87,8 +95,8 @@ Textures select CDRAM or uncached MAIN through `TextureMemory`. Render targets
 select RGBA8 or single-channel alpha coverage through `TargetFormat`; their strided
 layout, color surface and sampling view share the same format-specific pitch.
 Render targets and scanout use CDRAM; applications choose sampled-image placement to balance capacity
-and bandwidth. `MemoryUsage` reports each physical arena separately. The default
-CDRAM arena leaves capacity for the parameter buffer and scanout.
+and bandwidth. `MemoryUsage` reports each physical arena separately. CDRAM admission includes scanout and all mapped pixel blocks; the SDK parameter
+buffer is deducted before this shared domain is initialized.
 
 Textures and buffers own mapped allocations. Scene submissions retain their inputs
 until fragment completion, and display scanout retains its output independently.
@@ -110,15 +118,15 @@ Compatible color surfaces share bounded firmware scheduling targets. Configured
 budgets account for kernel capacity, live payload and infrastructure separately.
 Mapped arenas segregate small, medium and whole-block resources. Upload staging
 uses separate blocks; completed uploads cannot leave small staging allocations
-among retained graphics buffers. All classes share the arena's existing capacity
-and retention limits. Allocation and completion leases preserve physical ownership.
+among retained graphics buffers. All classes compete for their physical domain and use separate soft idle
+retention targets. Allocation and completion leases preserve physical ownership.
 
 Mapped arenas retain recently used blocks within configurable limits: 8 MiB for
 pixels and 1 MiB for buffers by default. Scheduling targets retain up to 4 MiB
-within their 16 MiB total limit. Allocation pressure releases idle owners; submitted
+for reuse. Allocation pressure releases idle owners; submitted
 work keeps its resources until completion. When kernel allocation reports exhausted
 physical pages, the device releases idle caches in that physical domain and retries
-once if storage was released. Allocation limits continue to include retained blocks.
+once if storage was released. Retained blocks remain charged to their physical domain.
 
 ## Ownership and threads
 

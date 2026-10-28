@@ -272,3 +272,29 @@ fn non_capacity_budget_failure_does_not_evict_idle_owners() {
     assert_eq!(freed.get(), 0);
     assert_eq!(idle.borrow().bytes(), 4);
 }
+
+#[test]
+fn shared_physical_admission_reclaims_cache_without_releasing_live_owners() {
+    struct Owned {
+        _commit: Commit,
+    }
+    let pressure = Pressure::default();
+    pressure.main.initialize(32);
+    pressure.cdram.initialize(12);
+    let fault = Fault::default();
+    let idle = Rc::new(RefCell::new(Retained::new(12)));
+    pressure.register(Domain::Cdram, &idle);
+    let scanout = pressure.commit(Domain::Cdram, 4, &fault).unwrap();
+    let cached = Rc::new(Owned {
+        _commit: pressure.commit(Domain::Cdram, 8, &fault).unwrap(),
+    });
+    idle.borrow_mut().touch(&cached, 8);
+    assert!(pressure.commit(Domain::Cdram, 8, &fault).is_err());
+    assert_eq!(pressure.usage(Domain::Cdram).committed_bytes, 12);
+    drop(cached);
+    let replacement = pressure.commit(Domain::Cdram, 8, &fault).unwrap();
+    assert_eq!(pressure.usage(Domain::Cdram).committed_bytes, 12);
+    assert_eq!(pressure.usage(Domain::Main).available_bytes(), 32);
+    drop((replacement, scanout));
+    assert_eq!(pressure.usage(Domain::Cdram).committed_bytes, 0);
+}

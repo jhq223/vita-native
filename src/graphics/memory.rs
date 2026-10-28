@@ -39,6 +39,7 @@ pub(super) struct Block {
     ticket: Option<Box<dyn crate::memory::MemoryReservation>>,
     arena_bytes: Option<BlockReservation>,
     physical_main: Option<crate::memory::MainCommit>,
+    physical: Option<super::pressure::Commit>,
 }
 impl Block {
     pub fn new(bytes: usize, kind: Kind, fault: &Fault, pressure: &Pressure) -> Result<Rc<Self>> {
@@ -58,6 +59,7 @@ impl Block {
             SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE
         };
         let ticket = pressure.reserve(kind.domain(), bytes as u64, fault)?;
+        let physical = pressure.commit(kind.domain(), bytes as u64, fault)?;
         let physical_main = pressure.commit_main(kind.domain(), bytes, fault)?;
         let uid = pressure.allocate(kind.domain(), fault, || unsafe {
             sceKernelAllocMemBlock(
@@ -78,6 +80,7 @@ impl Block {
             ticket,
             arena_bytes: None,
             physical_main: Some(physical_main),
+            physical: Some(physical),
         };
         sdk("sceKernelGetMemBlockBase", unsafe {
             sceKernelGetMemBlockBase(uid, &mut block.base)
@@ -112,6 +115,7 @@ impl Drop for Block {
                 self.ticket.take(),
                 self.arena_bytes.take(),
                 self.physical_main.take(),
+                self.physical.take(),
             ));
             return;
         }
@@ -129,6 +133,7 @@ impl Drop for Block {
                 self.ticket.take(),
                 self.arena_bytes.take(),
                 self.physical_main.take(),
+                self.physical.take(),
             ));
             return;
         }
@@ -143,6 +148,7 @@ impl Drop for Block {
                 self.ticket.take(),
                 self.arena_bytes.take(),
                 self.physical_main.take(),
+                self.physical.take(),
             ));
         }
     }
@@ -213,7 +219,6 @@ impl Allocation {
     }
 }
 pub(super) struct Arena {
-    name: &'static str,
     kind: Kind,
     quantum: usize,
     blocks: RefCell<[Vec<Weak<Block>>; Class::COUNT]>,
@@ -222,23 +227,12 @@ pub(super) struct Arena {
     pressure: Pressure,
     block_allocations: Cell<u64>,
     fault: Fault,
-    limit: u64,
 }
 impl Arena {
-    pub fn new(
-        name: &'static str,
-        kind: Kind,
-        fault: &Fault,
-        pressure: &Pressure,
-        limit: u64,
-        retained: u64,
-    ) -> Self {
-        let warm = Rc::new(RefCell::new(super::retained::Retained::new(
-            retained.min(limit),
-        )));
+    pub fn new(kind: Kind, fault: &Fault, pressure: &Pressure, retained: u64) -> Self {
+        let warm = Rc::new(RefCell::new(super::retained::Retained::new(retained)));
         pressure.register(kind.domain(), &warm);
         Self {
-            name,
             kind,
             quantum: if kind == Kind::Cdram {
                 256 * 1024
@@ -251,7 +245,6 @@ impl Arena {
             pressure: pressure.clone(),
             block_allocations: Cell::new(0),
             fault: fault.clone(),
-            limit,
         }
     }
     pub fn alloc(&self, bytes: usize, alignment: usize) -> Result<Allocation> {
@@ -283,19 +276,9 @@ impl Arena {
         } else {
             4096
         };
-        let preferred = bytes.max(self.quantum).next_multiple_of(page);
-        if self.reserved.get().saturating_add(preferred as u64) > self.limit {
-            self.release_idle();
-            self.fault.check()?;
-        }
-        let used = self.reserved.get();
         let block_bytes =
-            super::suballoc::block_size(bytes, self.quantum, page, self.limit.saturating_sub(used))
-                .ok_or(Error::Budget {
-                    domain: self.name,
-                    requested: used + bytes.next_multiple_of(page) as u64,
-                    limit: self.limit,
-                })?;
+            self.pressure
+                .block_size(self.kind.domain(), bytes, self.quantum, page, &self.fault)?;
         let mut block = Block::new(block_bytes, self.kind, &self.fault, &self.pressure)?;
         Rc::get_mut(&mut block)
             .expect("new arena block")
@@ -311,6 +294,9 @@ impl Arena {
     }
     pub fn release_idle(&self) {
         self.warm.borrow_mut().release_idle();
+    }
+    pub fn reserved_bytes(&self) -> u64 {
+        self.reserved.get()
     }
     pub fn usage(&self) -> ArenaUsage {
         let mut u = ArenaUsage {

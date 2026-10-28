@@ -408,45 +408,27 @@ impl Context {
         }
         let fault = Fault::default();
         let pressure = super::pressure::Pressure::new(main_budget);
+        pressure.initialize_main()?;
         let native = Native::new(config, &fault, &pressure, wake)?;
+        pressure.initialize_cdram()?;
         let targets = Rc::new(RefCell::new(super::render_targets::Pool::new(
-            config
-                .render_target_retained_bytes
-                .min(config.render_target_bytes),
+            config.render_target_retained_bytes,
         )));
         pressure.register(super::pressure::Domain::Main, &targets);
         let core = Rc::new(Core {
             native,
-            pixels: Arena::new(
-                "native CDRAM pixels",
-                Kind::Cdram,
-                &fault,
-                &pressure,
-                config.pixel_arena_bytes,
-                config.pixel_retained_bytes,
-            ),
+            pixels: Arena::new(Kind::Cdram, &fault, &pressure, config.pixel_retained_bytes),
             main_textures: Arena::new(
-                "native MAIN textures",
                 Kind::Uncached,
                 &fault,
                 &pressure,
-                config.main_texture_arena_bytes,
                 config.main_texture_retained_bytes,
             ),
-            display_pixels: Arena::new(
-                "native scanout",
-                Kind::Cdram,
-                &fault,
-                &pressure,
-                8 * 1024 * 1024,
-                0,
-            ),
+            display_pixels: Arena::new(Kind::Cdram, &fault, &pressure, 0),
             buffers: Arena::new(
-                "native buffers",
                 Kind::Uncached,
                 &fault,
                 &pressure,
-                config.buffer_arena_bytes,
                 config.buffer_retained_bytes,
             ),
             fault,
@@ -827,6 +809,16 @@ impl Context {
         s.last_presented = s.screen;
         s.screen = (s.screen + 1) % screens.len();
         self.check("present completion")
+    }
+    /// Read the shared physical admission counters in constant time.
+    /// Reuse this for planning; actual kernel allocation remains authoritative.
+    pub fn memory_state(&self) -> super::MemoryState {
+        let core = &self.0.core;
+        super::MemoryState {
+            main: core.pressure.usage(super::pressure::Domain::Main),
+            cdram: core.pressure.usage(super::pressure::Domain::Cdram),
+            scanout_bytes: core.display_pixels.reserved_bytes(),
+        }
     }
     /// Snapshot native owners and command counters after the latest completion poll.
     /// This observes accounting without polling notifications or retiring owners.
