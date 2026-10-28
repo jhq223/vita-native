@@ -319,6 +319,16 @@ pub struct VertexAttribute {
     pub offset: u32,
 }
 
+/// One interleaved f32 stream. Instance layouts use the hardware's 16-bit
+/// instance index; a draw range contains at most 65,535 instances.
+#[derive(Clone, Copy)]
+pub struct VertexLayout<'a> {
+    /// Distance between records, in f32 elements.
+    pub stride: u32,
+    /// Component count and element offset for each reflected location.
+    pub attributes: &'a [VertexAttribute],
+}
+
 /// Offline stages and the caller's interleaved f32 vertex interface.
 #[derive(Clone, Copy)]
 pub struct ProgramDescriptor<'a> {
@@ -334,6 +344,9 @@ pub struct ProgramDescriptor<'a> {
     pub stride: u32,
     /// Component count and element offset for each location.
     pub attributes: &'a [VertexAttribute],
+    /// Optional second stream, indexed once per instance rather than per vertex.
+    /// Its attribute locations must be distinct from the vertex stream.
+    pub instance: Option<VertexLayout<'a>>,
     /// Optional float4 fragment uniform receiving half-open pixel clip bounds.
     /// The fragment program must discard pixels outside this rectangle.
     /// Without it, internal scissor edges must be aligned to 32-pixel tiles.

@@ -8,6 +8,14 @@ use super::{
 use std::{ops::Range, prelude::v1::*, rc::Rc};
 use vitasdk_sys::*;
 /// One fully specified direct device draw. Scissor uses top-left x/y/width/height.
+pub struct DrawInstances<'a> {
+    /// Immutable stream matching the program's instance layout.
+    pub vertices: &'a VertexBuffer,
+    /// Half-open records within this buffer, at most 65,535 per draw. The stream
+    /// starts at this range's first record; base mesh indices wrap per instance.
+    pub range: Range<u32>,
+}
+/// One fully specified direct device draw. Scissor uses top-left x/y/width/height.
 pub struct Draw<'a> {
     /// Physical output or the current process scanout buffer.
     pub target: Target<'a>,
@@ -17,6 +25,9 @@ pub struct Draw<'a> {
     pub program: &'a Program,
     /// Immutable interleaved float input.
     pub vertices: &'a VertexBuffer,
+    /// Optional ordered instances, required exactly when the program declares
+    /// an instance stream. The base mesh range must contain complete triangles.
+    pub instances: Option<DrawInstances<'a>>,
     /// Optional elements; absent input uses bounded reusable sequential indices.
     pub indices: Option<&'a IndexBuffer>,
     /// Half-open element or sequential-vertex range.
@@ -47,6 +58,7 @@ impl Context {
                 components: 2,
                 offset: 0,
             }],
+            instance: None,
             clip_uniform: Some(clear.clip_uniform),
         })?;
         let color = program
@@ -158,6 +170,7 @@ impl Context {
             size,
             program: &clear.program,
             vertices: &clear.vertices,
+            instances: None,
             indices: None,
             range: 0..3,
             textures: &[],
@@ -177,6 +190,30 @@ impl Context {
             return Err(Error::Invalid("declared fragment output owns blending"));
         }
         self.same(&d.vertices.owner)?;
+        let instance_draw = match (&d.program.0.instance, &d.instances) {
+            (None, None) => None,
+            (Some((stride, attributes)), Some(instances)) => {
+                self.same(&instances.vertices.owner)?;
+                if *stride != instances.vertices.stride
+                    || *attributes != instances.vertices.attributes
+                {
+                    return Err(Error::Invalid("draw instance layout"));
+                }
+                Some(
+                    super::vertex_layout::instance_draw(
+                        &instances.range,
+                        instances.vertices.count,
+                        *stride,
+                        d.range
+                            .end
+                            .checked_sub(d.range.start)
+                            .ok_or(Error::Invalid("draw range"))?,
+                    )
+                    .ok_or(Error::Invalid("draw instance range"))?,
+                )
+            }
+            _ => return Err(Error::Invalid("draw instance stream")),
+        };
         if d.size.contains(&0)
             || d.range.start > d.range.end
             || d.textures.len() > 16
@@ -196,7 +233,11 @@ impl Context {
             scissor[0].saturating_add(scissor[2]).min(d.size[0]),
             scissor[1].saturating_add(scissor[3]).min(d.size[1]),
         ];
-        if d.range.is_empty() || min[0] >= max[0] || min[1] >= max[1] {
+        if d.range.is_empty()
+            || instance_draw.is_some_and(|draw| draw.count == 0)
+            || min[0] >= max[0]
+            || min[1] >= max[1]
+        {
             return Ok(());
         }
         if d.program.0.clip.is_none() && super::types::needs_fragment_clip(min, max, target.size())
@@ -242,6 +283,9 @@ impl Context {
         let r = s.recording.as_mut().expect("active scene");
         Self::retain(r, Lease::Program(d.program.clone()));
         Self::retain(r, Lease::Allocation(d.vertices.allocation.clone()));
+        if let Some(instances) = &d.instances {
+            Self::retain(r, Lease::Allocation(instances.vertices.allocation.clone()));
+        }
         Self::retain(r, Lease::Allocation(indices.clone()));
         for t in d.textures {
             Self::retain(r, Lease::Allocation(t.0.allocation.clone()));
@@ -341,29 +385,63 @@ impl Context {
                 sceGxmSetFragmentTexture(c, unit as u32, &raw)
             })?;
         }
-        if bindings.vertex(d.vertices.allocation.ptr() as usize) {
+        if bindings.vertex(0, d.vertices.allocation.ptr() as usize) {
             self.command("vertex stream", unsafe {
                 sceGxmSetVertexStream(c, 0, d.vertices.allocation.ptr().cast())
             })?;
         }
+        if let (Some(instances), Some(draw)) = (&d.instances, instance_draw) {
+            // SAFETY: range/stride validation bounded the byte offset and all
+            // fetched records; the recording retains the complete allocation.
+            let pointer = unsafe {
+                instances
+                    .vertices
+                    .allocation
+                    .ptr()
+                    .cast::<u8>()
+                    .add(draw.offset)
+            };
+            if bindings.vertex(1, pointer as usize) {
+                self.command("instance stream", unsafe {
+                    sceGxmSetVertexStream(c, 1, pointer.cast())
+                })?;
+            }
+        }
         self.command(
-            "sceGxmDraw",
+            if instance_draw.is_some() {
+                "sceGxmDrawInstanced"
+            } else {
+                "sceGxmDraw"
+            },
             self.0.timing.measure(Call::Draw, || unsafe {
-                sceGxmDraw(
-                    c,
-                    SCE_GXM_PRIMITIVE_TRIANGLES,
-                    if index_width == 2 {
-                        SCE_GXM_INDEX_FORMAT_U16
-                    } else {
-                        SCE_GXM_INDEX_FORMAT_U32
-                    },
-                    indices
-                        .ptr()
-                        .cast::<u8>()
-                        .add(d.range.start as usize * index_width)
-                        .cast(),
-                    d.range.end - d.range.start,
-                )
+                let pointer = indices
+                    .ptr()
+                    .cast::<u8>()
+                    .add(d.range.start as usize * index_width)
+                    .cast();
+                let format = if index_width == 2 {
+                    SCE_GXM_INDEX_FORMAT_U16
+                } else {
+                    SCE_GXM_INDEX_FORMAT_U32
+                };
+                if let Some(draw) = instance_draw {
+                    sceGxmDrawInstanced(
+                        c,
+                        SCE_GXM_PRIMITIVE_TRIANGLES,
+                        format,
+                        pointer,
+                        draw.count,
+                        draw.wrap,
+                    )
+                } else {
+                    sceGxmDraw(
+                        c,
+                        SCE_GXM_PRIMITIVE_TRIANGLES,
+                        format,
+                        pointer,
+                        d.range.end - d.range.start,
+                    )
+                }
             }),
         )
     }
