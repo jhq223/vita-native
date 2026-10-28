@@ -162,6 +162,33 @@ impl Native {
         sdk("sceGxmCreateContext", unsafe {
             sceGxmCreateContext(&params, &mut n.context)
         })?;
+        // Fixed pipeline state persists across scenes for this private context.
+        unsafe {
+            let c = n.context;
+            sceGxmSetCullMode(c, SCE_GXM_CULL_NONE);
+            sceGxmSetFrontDepthFunc(c, SCE_GXM_DEPTH_FUNC_ALWAYS);
+            sceGxmSetBackDepthFunc(c, SCE_GXM_DEPTH_FUNC_ALWAYS);
+            sceGxmSetFrontDepthWriteEnable(c, SCE_GXM_DEPTH_WRITE_DISABLED);
+            sceGxmSetBackDepthWriteEnable(c, SCE_GXM_DEPTH_WRITE_DISABLED);
+            sceGxmSetFrontStencilFunc(
+                c,
+                SCE_GXM_STENCIL_FUNC_ALWAYS,
+                SCE_GXM_STENCIL_OP_KEEP,
+                SCE_GXM_STENCIL_OP_KEEP,
+                SCE_GXM_STENCIL_OP_KEEP,
+                255,
+                0,
+            );
+            sceGxmSetBackStencilFunc(
+                c,
+                SCE_GXM_STENCIL_FUNC_ALWAYS,
+                SCE_GXM_STENCIL_OP_KEEP,
+                SCE_GXM_STENCIL_OP_KEEP,
+                SCE_GXM_STENCIL_OP_KEEP,
+                255,
+                0,
+            );
+        }
         let mut patch: SceGxmShaderPatcherParams = unsafe { core::mem::zeroed() };
         patch.hostAllocCallback = Some(host_alloc);
         patch.hostFreeCallback = Some(host_free);
@@ -306,6 +333,7 @@ pub(super) struct Inner {
     pub vsync: Cell<bool>,
     pub clear: RefCell<Option<Clear>>,
     pub bound_program: RefCell<Option<BoundProgram>>,
+    pub bindings: RefCell<super::bindings::Bindings>,
     pub display_detached: Cell<bool>,
     pub identity: RefCell<Option<Allocation>>,
 }
@@ -424,6 +452,7 @@ impl Context {
             vsync: Cell::new(vsync),
             clear: RefCell::new(None),
             bound_program: RefCell::new(None),
+            bindings: RefCell::new(super::bindings::Bindings::default()),
             display_detached: Cell::new(false),
             identity: RefCell::new(None),
         }));

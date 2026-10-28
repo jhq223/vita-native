@@ -8,6 +8,8 @@
 //! holds separate leases. `finish`, `reset` and `close` drain submitted work.
 #![deny(missing_docs)]
 #[cfg(any(target_os = "vita", test))]
+mod bindings;
+#[cfg(any(target_os = "vita", test))]
 mod gxp;
 mod layout;
 #[cfg(any(target_os = "vita", test))]
