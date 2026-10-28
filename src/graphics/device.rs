@@ -266,11 +266,11 @@ impl Lease {
     fn uses(&self, allocation: &Allocation) -> bool {
         matches!(self, Self::Allocation(a) if a.id() == allocation.id())
     }
-    fn key(&self) -> usize {
+    fn key(&self) -> (u8, usize) {
         match self {
-            Self::Allocation(a) => a.id(),
-            Self::Program(p) => Rc::as_ptr(&p.0) as usize,
-            Self::Target(f) => Rc::as_ptr(&f.0) as usize,
+            Self::Allocation(a) => (0, a.id()),
+            Self::Program(p) => (1, Rc::as_ptr(&p.0) as usize),
+            Self::Target(f) => (2, Rc::as_ptr(&f.0) as usize),
         }
     }
 }
@@ -672,12 +672,7 @@ impl Context {
         token
     }
     pub(super) fn retain(recording: &mut Recording, lease: Lease) {
-        let key = lease.key();
-        if !recording.leases.iter().any(|r| {
-            core::mem::discriminant(r) == core::mem::discriminant(&lease) && r.key() == key
-        }) {
-            recording.leases.push(lease);
-        }
+        super::leases::retain(&mut recording.leases, lease, Lease::key);
     }
     pub(super) fn end_scene(&self, s: &mut State) -> Result<Option<Rc<Completion>>> {
         let Some(r) = s.recording.take() else {

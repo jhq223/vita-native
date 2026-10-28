@@ -13,6 +13,8 @@ mod bindings;
 mod gxp;
 mod layout;
 #[cfg(any(target_os = "vita", test))]
+mod leases;
+#[cfg(any(target_os = "vita", test))]
 mod render_targets;
 #[cfg(any(target_os = "vita", test))]
 mod retained;
