@@ -37,6 +37,11 @@ programs and binding names. Programs are prepared once and reused by draws.
 `FragmentOutput::Declared` accepts `__nativecolor` programs that own blending and
 the output register format; their draws use replacement mode.
 
+Textures select CDRAM or uncached MAIN through `TextureMemory`. Render targets and
+scanout use CDRAM; applications choose sampled-image placement to balance capacity
+and bandwidth. `MemoryUsage` reports each physical arena separately. The default
+CDRAM arena leaves capacity for the parameter buffer and scanout.
+
 Textures and buffers own mapped allocations. Scene submissions retain their inputs
 until fragment completion, and display scanout retains its output independently.
 Bound programs remain owned until replaced or unbound. Presentation uses three

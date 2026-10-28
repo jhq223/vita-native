@@ -38,6 +38,10 @@ impl Texture {
     pub fn format(&self) -> TextureFormat {
         self.0.format
     }
+    /// Physical allocation domain, retained across uploads and aliases.
+    pub fn memory(&self) -> super::TextureMemory {
+        self.0.allocation.memory()
+    }
     /// Number of stored levels, including the base.
     pub fn mip_count(&self) -> u32 {
         self.0.mip_count
@@ -159,6 +163,7 @@ impl Context {
         strided: bool,
         display: bool,
         mip_count: u32,
+        memory: super::TextureMemory,
     ) -> Result<Texture> {
         self.check("texture creation")?;
         let l = if strided {
@@ -173,7 +178,10 @@ impl Context {
         let arena = if display {
             &self.0.core.display_pixels
         } else {
-            &self.0.core.pixels
+            match memory {
+                super::TextureMemory::Cdram => &self.0.core.pixels,
+                super::TextureMemory::Main => &self.0.core.main_textures,
+            }
         };
         let allocation = arena.alloc(l.bytes, 256)?;
         let mut raw = unsafe { core::mem::zeroed() };
@@ -226,8 +234,13 @@ impl Context {
         })))
     }
     /// Allocate an ordinary sampled texture with the pure `texture_layout` contract.
-    pub fn create_texture(&self, size: [u32; 2], format: TextureFormat) -> Result<Texture> {
-        self.allocate_texture(size, format, false, false, 1)
+    pub fn create_texture(
+        &self,
+        size: [u32; 2],
+        format: TextureFormat,
+        memory: super::TextureMemory,
+    ) -> Result<Texture> {
+        self.allocate_texture(size, format, false, false, 1, memory)
     }
     /// Allocate a complete sampled chain; count includes the base level (SDK mipCount).
     pub fn create_mip_texture(
@@ -235,8 +248,9 @@ impl Context {
         size: [u32; 2],
         format: TextureFormat,
         count: u32,
+        memory: super::TextureMemory,
     ) -> Result<Texture> {
-        self.allocate_texture(size, format, false, false, count)
+        self.allocate_texture(size, format, false, false, count, memory)
     }
     /// Write rows of an ordinary uncompressed sampled mip texture after its readers finish.
     /// Source bytes are consumed synchronously; padding follows the native mip layout.
@@ -273,10 +287,24 @@ impl Context {
     }
     /// Allocate the same explicit row pitch reported by `target_layout`.
     pub fn create_target_texture(&self, size: [u32; 2]) -> Result<Texture> {
-        self.allocate_texture(size, TextureFormat::Rgba8, true, false, 1)
+        self.allocate_texture(
+            size,
+            TextureFormat::Rgba8,
+            true,
+            false,
+            1,
+            super::TextureMemory::Cdram,
+        )
     }
     pub(super) fn create_display_texture(&self, size: [u32; 2]) -> Result<Texture> {
-        self.allocate_texture(size, TextureFormat::Rgba8, true, true, 1)
+        self.allocate_texture(
+            size,
+            TextureFormat::Rgba8,
+            true,
+            true,
+            1,
+            super::TextureMemory::Cdram,
+        )
     }
     /// Reorder row-major BC blocks directly into final mapped Morton storage.
     pub fn create_bc_texture(
@@ -284,11 +312,12 @@ impl Context {
         size: [u32; 2],
         format: TextureFormat,
         blocks: &[u8],
+        memory: super::TextureMemory,
     ) -> Result<Texture> {
         if !format.compressed() {
             return Err(Error::Invalid("BC format"));
         }
-        let texture = self.create_texture(size, format)?;
+        let texture = self.create_texture(size, format, memory)?;
         self.upload_bc_texture(&texture, blocks)?;
         Ok(texture)
     }

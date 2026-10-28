@@ -151,6 +151,12 @@ impl Allocation {
             range,
         }))
     }
+    pub fn memory(&self) -> super::TextureMemory {
+        match &self.0.storage {
+            Storage::Arena(block) if block.kind == Kind::Cdram => super::TextureMemory::Cdram,
+            _ => super::TextureMemory::Main,
+        }
+    }
     pub fn len(&self) -> usize {
         self.0.range.len()
     }
@@ -172,6 +178,7 @@ impl Allocation {
     }
 }
 pub(super) struct Arena {
+    name: &'static str,
     kind: Kind,
     quantum: usize,
     blocks: RefCell<Vec<Weak<Block>>>,
@@ -181,8 +188,9 @@ pub(super) struct Arena {
     limit: u64,
 }
 impl Arena {
-    pub fn new(kind: Kind, fault: &Fault, limit: u64, retained: u64) -> Self {
+    pub fn new(name: &'static str, kind: Kind, fault: &Fault, limit: u64, retained: u64) -> Self {
         Self {
+            name,
             kind,
             quantum: if kind == Kind::Cdram {
                 256 * 1024
@@ -230,11 +238,7 @@ impl Arena {
         let used = capacity();
         if used + block_bytes as u64 > self.limit {
             return Err(Error::Budget {
-                domain: if self.kind == Kind::Cdram {
-                    "native pixel arena"
-                } else {
-                    "native buffer arena"
-                },
+                domain: self.name,
                 requested: used + block_bytes as u64,
                 limit: self.limit,
             });

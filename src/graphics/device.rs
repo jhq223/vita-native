@@ -259,6 +259,7 @@ impl Drop for Native {
 }
 pub(super) struct Core {
     pub pixels: Arena,
+    pub main_textures: Arena,
     pub display_pixels: Arena,
     pub buffers: Arena,
     pub native: Native,
@@ -400,13 +401,22 @@ impl Context {
         let core = Rc::new(Core {
             native,
             pixels: Arena::new(
+                "native CDRAM pixels",
                 Kind::Cdram,
                 &fault,
                 config.pixel_arena_bytes,
                 config.pixel_retained_bytes,
             ),
-            display_pixels: Arena::new(Kind::Cdram, &fault, 8 * 1024 * 1024, 0),
+            main_textures: Arena::new(
+                "native MAIN textures",
+                Kind::Uncached,
+                &fault,
+                config.main_texture_arena_bytes,
+                config.main_texture_retained_bytes,
+            ),
+            display_pixels: Arena::new("native scanout", Kind::Cdram, &fault, 8 * 1024 * 1024, 0),
             buffers: Arena::new(
+                "native buffers",
                 Kind::Uncached,
                 &fault,
                 config.buffer_arena_bytes,
@@ -803,6 +813,7 @@ impl Context {
         Ok(MemoryUsage {
             submission_timing: self.0.timing.snapshot(),
             pixels: self.0.core.pixels.usage(),
+            main_textures: self.0.core.main_textures.usage(),
             buffers: self.0.core.buffers.usage(),
             parameter_cdram_bytes: self.0.core.config.parameter_bytes.into(),
             context_ring_bytes: n.blocks.iter().take(4).map(|b| b.bytes as u64).sum(),
@@ -865,6 +876,7 @@ impl Context {
         inner.state.get_mut().last = None;
         let core = Rc::get_mut(&mut inner.core).expect("all external device owners released");
         core.pixels.release_idle();
+        core.main_textures.release_idle();
         core.display_pixels.release_idle();
         core.buffers.release_idle();
         if let Err(e) = core.native.close() {

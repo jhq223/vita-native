@@ -76,11 +76,25 @@ pub struct DriverInfo {
     /// Offline shader profiles consumed by this device.
     pub shading_language: String,
 }
+/// Physical location of an owned sampled texture.
+/// Both domains are GPU-cached; MAIN allocations bypass the CPU cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureMemory {
+    /// High-bandwidth memory for repeatedly sampled or GPU-written pixels.
+    Cdram,
+    /// Uncached main memory for source assets, sharing bandwidth with the CPU.
+    Main,
+}
 /// Fixed infrastructure budgets. Pixel/buffer arenas grow by suballocated blocks.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
-    /// Maximum kernel capacity retained by each suballocation domain.
+    /// CDRAM texture/target capacity, excluding scanout and the parameter buffer.
+    /// The default 88 MiB leaves 8 MiB for scanout and 16 MiB for parameters.
     pub pixel_arena_bytes: u64,
+    /// Uncached MAIN texture capacity, independent of geometry and staging.
+    pub main_texture_arena_bytes: u64,
+    /// Idle MAIN texture blocks retained within main_texture_arena_bytes.
+    pub main_texture_retained_bytes: u64,
     /// Reserved uncached LPDDR cap for geometry and upload staging; default 16 MiB.
     pub buffer_arena_bytes: u64,
     /// Strongly retained pixel block capacity, included in pixel_arena_bytes.
@@ -115,7 +129,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            pixel_arena_bytes: 96 * 1024 * 1024,
+            pixel_arena_bytes: 88 * 1024 * 1024,
+            main_texture_arena_bytes: 64 * 1024 * 1024,
+            main_texture_retained_bytes: 8 * 1024 * 1024,
             buffer_arena_bytes: 16 * 1024 * 1024,
             pixel_retained_bytes: 8 * 1024 * 1024,
             buffer_retained_bytes: 1024 * 1024,
@@ -182,6 +198,8 @@ pub struct MemoryUsage {
     pub submission_timing: SubmissionTiming,
     /// Caller texture/target CDRAM arena; excludes scanout and parameter memory.
     pub pixels: ArenaUsage,
+    /// Owned sampled textures in uncached MAIN; excludes imported media aliases.
+    pub main_textures: ArenaUsage,
     /// Geometry and transfer staging arena; includes upload_staging_bytes.
     pub buffers: ArenaUsage,
     /// libgxm parameter-buffer reservation requested at initialization.

@@ -50,6 +50,10 @@ vita-native = { git = "https://github.com/jhq223/vita-native", rev = "COMMIT", f
 近期使用的块，默认像素 8 MiB、缓冲 1 MiB。固件调度目标的总额度为 16 MiB，
 其中最多保留 4 MiB 供复用。分配压力释放空闲所有者，已提交工作持有资源至完成。
 
+纹理通过 `TextureMemory` 选择 CDRAM 或无 CPU 缓存的 MAIN 内存。渲染目标与扫描输出使用
+CDRAM；应用按容量和带宽需求安排源图片。`MemoryUsage` 分别记录各物理池，默认 CDRAM
+池为参数缓冲和扫描输出预留空间。
+
 ## 所有权与线程
 
 图形上下文在同一线程创建和使用。纹理、程序和几何缓冲持有设备引用。
