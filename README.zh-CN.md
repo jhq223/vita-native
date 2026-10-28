@@ -126,7 +126,9 @@ GXM 导入该存储用于采样，
 使用安装了 `rust-src` 的 nightly Rust 和 VitaSDK：
 
 ```sh
-VITASDK=/usr/local/vitasdk cargo +nightly check --all-features \
+VITASDK=/usr/local/vitasdk \
+PATH="/usr/local/vitasdk/bin:$PATH" TARGET_CC=arm-vita-eabi-gcc \
+cargo +nightly check --all-features \
   --target armv7-sony-vita-newlibeabihf -Z build-std=std,panic_unwind
 ```
 

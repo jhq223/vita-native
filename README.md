@@ -157,7 +157,9 @@ sampling and retains their mapping through fragment completion; the final reader
 Use nightly Rust with the `rust-src` component and VitaSDK:
 
 ```sh
-VITASDK=/usr/local/vitasdk cargo +nightly check --all-features \
+VITASDK=/usr/local/vitasdk \
+PATH="/usr/local/vitasdk/bin:$PATH" TARGET_CC=arm-vita-eabi-gcc \
+cargo +nightly check --all-features \
   --target armv7-sony-vita-newlibeabihf -Z build-std=std,panic_unwind
 ```
 
