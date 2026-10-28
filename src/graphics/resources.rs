@@ -803,24 +803,30 @@ impl Context {
         b.maximum = maximum;
         Ok(())
     }
-    /// Capture top-left visible RGBA rows after this target's users complete.
-    pub fn read_rgba(&self, target: &Framebuffer, output: &mut [u8]) -> Result<()> {
+    /// Copy consecutive top-left visible RGBA rows after this target's users complete.
+    /// `first_row` and the number of rows in `output` must fit the target.
+    pub fn read_rgba(&self, target: &Framebuffer, first_row: u32, output: &mut [u8]) -> Result<()> {
         self.same(&target.0.owner)?;
+        let row = target.size()[0] as usize * 4;
+        let rows = if row == 0 { 0 } else { output.len() / row };
         if target.texture().format() != TextureFormat::Rgba8
-            || output.len() != target.size()[0] as usize * target.size()[1] as usize * 4
+            || row == 0
+            || output.len() % row != 0
+            || (first_row as usize)
+                .checked_add(rows)
+                .is_none_or(|end| end > target.size()[1] as usize)
         {
             return Err(Error::Invalid("capture extent"));
         }
         let t = &target.0.texture;
         self.await_allocation(&t.0.allocation)?;
-        let row = target.size()[0] as usize * 4;
         for (y, dest) in output.chunks_exact_mut(row).enumerate() {
             let source = unsafe {
                 core::slice::from_raw_parts(
                     t.0.allocation
                         .ptr()
                         .cast::<u8>()
-                        .add(y * t.0.layout.row_stride_bytes),
+                        .add((first_row as usize + y) * t.0.layout.row_stride_bytes),
                     row,
                 )
             };
