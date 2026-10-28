@@ -69,6 +69,11 @@ mod app {
         pub const SCE_AUDIO_OUT_ERROR_INVALID_PORT: u32 = 0x80000001;
         pub const SCE_AUDIO_OUT_ERROR_NOT_OPENED: u32 = 0x80000002;
         pub unsafe fn sceAudioOutOpenPort(_: i32, _: i32, _: i32, _: i32) -> i32 {
+            let (state, ready) = native();
+            let mut state = state.lock().unwrap();
+            state.opens += 1;
+            ready.notify_all();
+            drop(ready.wait_while(state, |state| state.block_open).unwrap());
             1
         }
         pub unsafe fn sceAudioOutSetVolume(_: i32, _: i32, _: *mut i32) -> i32 {
@@ -95,8 +100,10 @@ mod app {
             }
         }
         pub unsafe fn sceAudioOutReleasePort(_: i32) -> i32 {
-            native().0.lock().unwrap().releases += 1;
-            0
+            let mut state = native().0.lock().unwrap();
+            state.releases += 1;
+            state.release_thread = Some(std::thread::current().id());
+            state.release_error
         }
     }
 }
@@ -110,6 +117,14 @@ struct Native {
     output_permits: usize,
     drain_permits: usize,
     output_error: i32,
+    opens: usize,
+    block_open: bool,
+    release_error: i32,
+    release_thread: Option<std::thread::ThreadId>,
+}
+fn serial() -> &'static Mutex<()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    &SERIAL
 }
 fn native() -> &'static (Mutex<Native>, Condvar) {
     static NATIVE: OnceLock<(Mutex<Native>, Condvar)> = OnceLock::new();
@@ -138,6 +153,7 @@ enum Command {
 #[test]
 fn pause_and_resume_return_while_native_output_and_drain_are_blocked_and_preserve_request_generation()
  {
+    let _serial = serial().lock().unwrap();
     *native().0.lock().unwrap() = Native::default();
     let renders = Arc::new(AtomicUsize::new(0));
     let rendered = renders.clone();
@@ -238,4 +254,84 @@ fn pause_and_resume_return_while_native_output_and_drain_are_blocked_and_preserv
     permit(0, 1);
     stream.stop().unwrap();
     assert_eq!(stream.state().unwrap(), audio::StreamState::Closed);
+}
+
+#[test]
+fn close_keeps_native_ownership_while_output_and_release_are_pending_and_retries_off_control() {
+    let _serial = serial().lock().unwrap();
+    *native().0.lock().unwrap() = Native::default();
+    let fault = Arc::new(AtomicI32::new(0));
+    let faults = fault.clone();
+    let mut stream = audio::Stream::new(
+        |_, _| {},
+        move |e| {
+            faults.store(e.code, Ordering::Release);
+        },
+    )
+    .unwrap();
+    stream.play().unwrap();
+    wait(|| native().0.lock().unwrap().outputs == 1);
+    stream.begin_stop().unwrap();
+    assert_eq!(stream.state().unwrap(), audio::StreamState::Stopping);
+    assert!(!stream.poll_stop().unwrap());
+    assert_eq!(native().0.lock().unwrap().releases, 0);
+    permit(1, 0);
+    wait(|| native().0.lock().unwrap().drains == 1);
+    assert!(
+        !stream.poll_stop().unwrap(),
+        "pending native drain is not closure"
+    );
+    native().0.lock().unwrap().release_error = -88;
+    permit(0, 1);
+    wait(|| fault.load(Ordering::Acquire) == -88);
+    assert_eq!(stream.poll_stop().unwrap_err().code, -88);
+    assert_eq!(native().0.lock().unwrap().releases, 1);
+    assert_ne!(
+        native().0.lock().unwrap().release_thread,
+        Some(std::thread::current().id())
+    );
+    // Merely polling never repeats a failed SDK release or frees the port.
+    for _ in 0..10 {
+        assert_eq!(stream.poll_stop().unwrap_err().code, -88);
+    }
+    assert_eq!(native().0.lock().unwrap().releases, 1);
+    native().0.lock().unwrap().release_error = 0;
+    stream.begin_stop().unwrap();
+    permit(0, 1);
+    wait(|| stream.poll_stop().unwrap());
+    assert_eq!(stream.state().unwrap(), audio::StreamState::Closed);
+    assert_eq!(native().0.lock().unwrap().releases, 2);
+}
+
+#[test]
+fn native_port_opening_and_cancellation_remain_owned_without_blocking_the_controller() {
+    let _serial = serial().lock().unwrap();
+    *native().0.lock().unwrap() = Native {
+        block_open: true,
+        ..Default::default()
+    };
+    let (ready, constructed) = mpsc::channel();
+    let constructor = std::thread::spawn(move || {
+        ready
+            .send(audio::Stream::new(|_, _| {}, |_| {}).unwrap())
+            .unwrap();
+    });
+    let mut stream = constructed
+        .recv_timeout(Duration::from_secs(1))
+        .expect("constructor waited for native open");
+    constructor.join().unwrap();
+    wait(|| native().0.lock().unwrap().opens == 1);
+    assert_eq!(stream.state().unwrap(), audio::StreamState::Opening);
+    stream.begin_stop().unwrap();
+    assert_eq!(stream.state().unwrap(), audio::StreamState::Stopping);
+    assert!(!stream.poll_stop().unwrap());
+    {
+        let (state, ready) = native();
+        state.lock().unwrap().block_open = false;
+        ready.notify_all();
+    }
+    permit(0, 1);
+    wait(|| stream.poll_stop().unwrap());
+    assert_eq!(native().0.lock().unwrap().outputs, 0);
+    assert_eq!(native().0.lock().unwrap().releases, 1);
 }
