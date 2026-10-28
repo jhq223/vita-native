@@ -8,6 +8,7 @@ use std::{
     cell::RefCell,
     prelude::v1::*,
     rc::{Rc, Weak},
+    sync::Arc,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -26,15 +27,59 @@ struct RegisteredPool {
     pool: Weak<dyn IdlePool>,
 }
 #[derive(Clone, Default)]
-pub(super) struct Pressure(Rc<RefCell<Vec<RegisteredPool>>>);
+pub(super) struct Pressure {
+    pools: Rc<RefCell<Vec<RegisteredPool>>>,
+    main_budget: Option<Arc<dyn crate::memory::MemoryBudget>>,
+}
 
 impl Pressure {
+    pub fn new(main_budget: Option<Arc<dyn crate::memory::MemoryBudget>>) -> Self {
+        Self {
+            main_budget,
+            ..Self::default()
+        }
+    }
     pub fn register<T: IdlePool + 'static>(&self, domain: Domain, pool: &Rc<T>) {
         let pool: Rc<dyn IdlePool> = pool.clone();
-        self.0.borrow_mut().push(RegisteredPool {
+        self.pools.borrow_mut().push(RegisteredPool {
             domain,
             pool: Rc::downgrade(&pool),
         });
+    }
+
+    fn reclaim(&self, domain: Domain, fault: &Fault) -> Result<u64> {
+        let mut released = 0;
+        for owner in self.pools.borrow().iter() {
+            if owner.domain == domain
+                && let Some(pool) = owner.pool.upgrade()
+            {
+                released += pool.release_idle();
+                fault.check()?;
+            }
+        }
+        Ok(released)
+    }
+    pub fn reserve(
+        &self,
+        domain: Domain,
+        bytes: u64,
+        fault: &Fault,
+    ) -> Result<Option<Box<dyn crate::memory::MemoryReservation>>> {
+        if domain != Domain::Main {
+            return Ok(None);
+        }
+        let Some(budget) = &self.main_budget else {
+            return Ok(None);
+        };
+        match budget.reserve(bytes) {
+            Ok(ticket) => Ok(Some(ticket)),
+            Err(first) => {
+                if self.reclaim(domain, fault)? == 0 {
+                    return Err(Error::Admission(first));
+                }
+                budget.reserve(bytes).map(Some).map_err(Error::Admission)
+            }
+        }
     }
 
     pub fn allocate(
@@ -55,21 +100,10 @@ impl Pressure {
             0x80024309 => domain == Domain::Cdram,
             _ => false,
         };
-        if exhausted {
-            let mut released = 0;
-            for owner in self.0.borrow().iter() {
-                if owner.domain == domain
-                    && let Some(pool) = owner.pool.upgrade()
-                {
-                    released += pool.release_idle();
-                    fault.check()?;
-                }
-            }
-            if released > 0 {
-                let next = allocate();
-                sdk("sceKernelAllocMemBlock", next)?;
-                return Ok(next);
-            }
+        if exhausted && self.reclaim(domain, fault)? > 0 {
+            let next = allocate();
+            sdk("sceKernelAllocMemBlock", next)?;
+            return Ok(next);
         }
         Err(Error::Sdk("sceKernelAllocMemBlock", first))
     }

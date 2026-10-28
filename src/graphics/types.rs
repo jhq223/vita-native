@@ -24,6 +24,8 @@ pub enum Error {
         /// Configured maximum capacity for this domain.
         limit: u64,
     },
+    /// Caller-supplied MAIN physical budget rejected an allocation.
+    Admission(String),
     /// Native construction failed before submission.
     Sdk(&'static str, i32),
     /// A submitted/native ownership operation failed; owners remain retained.

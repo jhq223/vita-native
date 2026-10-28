@@ -1,5 +1,6 @@
 //! Host lifecycle checks execute the production pool against an in-memory kernel
 //! allocator. SDK mapping and DMA remain covered by Vita target compilation.
+use vita_native::memory;
 #[allow(dead_code)]
 #[path = "../src/app/memory.rs"]
 mod layout;

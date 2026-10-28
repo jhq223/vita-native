@@ -167,3 +167,71 @@ fn scheduling_target_allocation_can_reclaim_its_own_pool() {
     assert!(pool.borrow().contains([256, 256]).unwrap());
     assert_eq!(target.bytes, 4096);
 }
+
+#[derive(Default)]
+struct BudgetState {
+    used: u64,
+    calls: usize,
+}
+struct TestBudget {
+    limit: u64,
+    state: std::sync::Arc<std::sync::Mutex<BudgetState>>,
+}
+struct TestTicket {
+    bytes: u64,
+    state: std::sync::Arc<std::sync::Mutex<BudgetState>>,
+}
+impl Drop for TestTicket {
+    fn drop(&mut self) {
+        self.state.lock().unwrap().used -= self.bytes;
+    }
+}
+impl crate::memory::MemoryBudget for TestBudget {
+    fn reserve(
+        &self,
+        bytes: u64,
+    ) -> std::result::Result<Box<dyn crate::memory::MemoryReservation>, String> {
+        let mut state = self.state.lock().unwrap();
+        state.calls += 1;
+        if state.used + bytes > self.limit {
+            return Err("MAIN limit".into());
+        }
+        state.used += bytes;
+        Ok(Box::new(TestTicket {
+            bytes,
+            state: self.state.clone(),
+        }))
+    }
+}
+struct BudgetOwner {
+    _ticket: Box<dyn crate::memory::MemoryReservation>,
+}
+#[test]
+fn main_budget_reclaims_idle_only_and_preserves_inflight_and_cdram() {
+    let state = std::sync::Arc::new(std::sync::Mutex::new(BudgetState::default()));
+    let budget = std::sync::Arc::new(TestBudget {
+        limit: 12,
+        state: state.clone(),
+    });
+    let pressure = Pressure::new(Some(budget));
+    let fault = Fault::default();
+    let idle = Rc::new(RefCell::new(Retained::new(12)));
+    pressure.register(Domain::Main, &idle);
+    let idle_owner = Rc::new(BudgetOwner {
+        _ticket: pressure.reserve(Domain::Main, 4, &fault).unwrap().unwrap(),
+    });
+    idle.borrow_mut().touch(&idle_owner, 4);
+    drop(idle_owner);
+    let flight = pressure.reserve(Domain::Main, 8, &fault).unwrap().unwrap();
+    let cdram = pressure.reserve(Domain::Cdram, 100, &fault).unwrap();
+    assert!(cdram.is_none());
+    let new = pressure.reserve(Domain::Main, 4, &fault).unwrap().unwrap();
+    assert_eq!(state.lock().unwrap().used, 12);
+    assert_eq!(state.lock().unwrap().calls, 4);
+    assert!(
+        matches!(pressure.reserve(Domain::Main, 1, &fault), Err(Error::Admission(message)) if message == "MAIN limit")
+    );
+    assert_eq!(state.lock().unwrap().calls, 5);
+    drop((flight, new));
+    assert_eq!(state.lock().unwrap().used, 0);
+}

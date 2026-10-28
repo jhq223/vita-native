@@ -16,6 +16,8 @@ pub mod audio;
 pub mod graphics;
 #[cfg(all(feature = "graphics", target_os = "vita"))]
 mod graphics_active;
+/// Native allocation budget and owned reservation contracts.
+pub mod memory;
 /// AvPlayer hardware decoding from an owned seekable stream.
 #[cfg(all(feature = "video", target_os = "vita"))]
 pub mod video;

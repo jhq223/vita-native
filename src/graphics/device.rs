@@ -369,18 +369,25 @@ impl Fence {
 }
 impl Context {
     /// Create a GXM device and three process-sized scanout buffers.
-    pub fn new(vsync: bool, clear: ClearProgram<'_>) -> Result<Self> {
-        Self::with_config(Config::default(), vsync, clear, None)
+    pub fn new(
+        vsync: bool,
+        clear: ClearProgram<'_>,
+        main_budget: Option<Arc<dyn crate::memory::MemoryBudget>>,
+    ) -> Result<Self> {
+        Self::with_config(Config::default(), vsync, clear, None, main_budget)
     }
     /// Select infrastructure budgets and an optional display-completion wake callback.
     /// The callback runs after completion is published, including display errors.
     /// It must return promptly without panicking or issuing graphics commands.
     /// The device owns it until all display callbacks have finished during close.
+    /// MAIN kernel blocks retain their optional caller-supplied budget reservation
+    /// until physical release; CDRAM allocations use their separate limits.
     pub fn with_config(
         config: Config,
         vsync: bool,
         clear: ClearProgram<'_>,
         wake: Option<Arc<dyn Fn() + Send + Sync>>,
+        main_budget: Option<Arc<dyn crate::memory::MemoryBudget>>,
     ) -> Result<Self> {
         // Sony gxm/defs.h: SCE_GXM_MAX_SCENES_PER_RENDERTARGET (absent from VitaSDK bindings).
         if config.scenes_per_frame == 0
@@ -400,7 +407,7 @@ impl Context {
             return Err(Error::Invalid("GXM configuration"));
         }
         let fault = Fault::default();
-        let pressure = super::pressure::Pressure::default();
+        let pressure = super::pressure::Pressure::new(main_budget);
         let native = Native::new(config, &fault, &pressure, wake)?;
         let targets = Rc::new(RefCell::new(super::render_targets::Pool::new(
             config

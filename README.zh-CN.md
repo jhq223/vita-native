@@ -100,3 +100,5 @@ cargo fmt --all -- --check
 ## 许可证
 
 [MIT](LICENSE)。
+
+GXM 上下文可接收调用方共享的 MAIN 内核块预算。页对齐后的块在分配前准入，直到物理释放成功才归还；额度不足时先回收 MAIN 空闲块。CDRAM 沿用独立额度。

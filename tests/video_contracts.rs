@@ -1,6 +1,10 @@
 //! Device-independent input, layout and bounded MP4 metadata checks.
 #[path = "../src/app/memory.rs"]
-pub mod memory;
+pub mod layout;
+pub mod memory {
+    pub use crate::layout::{MemoryKind, MemoryLayout};
+    pub use vita_native::memory::{MemoryBudget, MemoryReservation};
+}
 mod app {
     pub use crate::memory;
 }

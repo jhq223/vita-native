@@ -36,6 +36,7 @@ pub(super) struct Block {
     kind: Kind,
     fault: Fault,
     free: RefCell<FreeList>,
+    ticket: Option<Box<dyn crate::memory::MemoryReservation>>,
 }
 impl Block {
     pub fn new(bytes: usize, kind: Kind, fault: &Fault, pressure: &Pressure) -> Result<Rc<Self>> {
@@ -54,6 +55,7 @@ impl Block {
         } else {
             SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE
         };
+        let ticket = pressure.reserve(kind.domain(), bytes as u64, fault)?;
         let uid = pressure.allocate(kind.domain(), fault, || unsafe {
             sceKernelAllocMemBlock(
                 c"VitaGraphics".as_ptr(),
@@ -70,6 +72,7 @@ impl Block {
             kind: Kind::Driver,
             fault: fault.clone(),
             free: RefCell::new(FreeList::new(bytes)),
+            ticket,
         };
         sdk("sceKernelGetMemBlockBase", unsafe {
             sceKernelGetMemBlockBase(uid, &mut block.base)
@@ -100,6 +103,7 @@ impl Block {
 impl Drop for Block {
     fn drop(&mut self) {
         if self.fault.get().is_some() {
+            std::mem::forget(self.ticket.take());
             return;
         }
         let code = unsafe {
@@ -112,13 +116,18 @@ impl Drop for Block {
         };
         if code < 0 {
             self.fault.record("unmap native GXM block", code);
+            std::mem::forget(self.ticket.take());
             return;
         }
-        self.fault
+        if self
+            .fault
             .command("sceKernelFreeMemBlock", unsafe {
                 sceKernelFreeMemBlock(self.uid)
             })
-            .ok();
+            .is_err()
+        {
+            std::mem::forget(self.ticket.take());
+        }
     }
 }
 enum Storage {
