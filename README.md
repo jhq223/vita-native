@@ -41,9 +41,13 @@ Bound programs remain owned until replaced or unbound. Presentation uses three
 scanout buffers and native queue admission; resource updates wait for their own users.
 Each scanout buffer owns one persistent display sync object (three per context).
 Offscreen surfaces use ordered fragment scenes and fragment/transfer synchronization
-flags; their storage remains leased through completion notifications. Their count
-therefore does not increase native display sync object usage. Native accounting
+flags; their storage remains leased through completion notifications. Native accounting
 reports display sync object and scheduling target counts separately from bytes.
+The optional `profiling` feature adds fixed cumulative SDK call counts and CPU wall
+times to `MemoryUsage::submission_timing`, separating scene begin/end, uniform
+reservation, draw submission and three explicit notification wait causes. These
+measurements include SDK blocking; they do not measure GPU shader execution.
+Builds without this feature erase the timers and return zero timing values.
 Compatible color surfaces share bounded firmware scheduling targets. Configured
 budgets account for kernel capacity, live payload and infrastructure separately.
 Mapped arenas retain recently used blocks within configurable limits: 8 MiB for

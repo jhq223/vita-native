@@ -24,6 +24,8 @@ mod render_targets;
 mod retained;
 #[cfg(any(target_os = "vita", test))]
 mod suballoc;
+#[cfg(any(target_os = "vita", test))]
+mod timing;
 mod types;
 #[cfg(any(target_os = "vita", test))]
 mod uniform_layout;

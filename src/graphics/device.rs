@@ -324,6 +324,7 @@ pub(super) struct Clear {
     pub color: Uniform,
 }
 pub(super) struct Inner {
+    pub timing: super::timing::Timings,
     pub core: Rc<Core>,
     pub state: RefCell<State>,
     pub screens: RefCell<Vec<Framebuffer>>,
@@ -427,6 +428,7 @@ impl Context {
             imported_video_bytes: Rc::new(Cell::new(0)),
         });
         let context = Self(Rc::new(Inner {
+            timing: super::timing::Timings::default(),
             core,
             state: RefCell::new(State {
                 recording: None,
@@ -566,7 +568,11 @@ impl Context {
                 value: f.token.value,
             };
             self.command("sceGxmNotificationWait(capacity)", unsafe {
-                sceGxmNotificationWait(&n)
+                self.0
+                    .timing
+                    .measure(super::timing::Call::NotificationCapacityWait, || {
+                        sceGxmNotificationWait(&n)
+                    })
             })?;
             self.poll_state(s)?;
         }
@@ -612,12 +618,17 @@ impl Context {
                 .find(|f| f.token.staging > 0)
                 .expect("pending staging")
                 .token;
-            self.command("sceGxmNotificationWait(upload capacity)", unsafe {
-                sceGxmNotificationWait(&SceGxmNotification {
-                    address: token.address,
-                    value: token.value,
-                })
-            })?;
+            self.command(
+                "sceGxmNotificationWait(upload capacity)",
+                self.0
+                    .timing
+                    .measure(super::timing::Call::UploadCapacityWait, || unsafe {
+                        sceGxmNotificationWait(&SceGxmNotification {
+                            address: token.address,
+                            value: token.value,
+                        })
+                    }),
+            )?;
         }
     }
     pub(super) fn await_allocation(&self, allocation: &Allocation) -> Result<()> {
@@ -640,12 +651,17 @@ impl Context {
                 .find(|f| f.token.leases.borrow().iter().any(|l| l.uses(allocation)))
                 .ok_or(Error::Invalid("allocation has an external native lease"))?
                 .token;
-            self.command("sceGxmNotificationWait(resource replacement)", unsafe {
-                sceGxmNotificationWait(&SceGxmNotification {
-                    address: token.address,
-                    value: token.value,
-                })
-            })?;
+            self.command(
+                "sceGxmNotificationWait(resource replacement)",
+                self.0
+                    .timing
+                    .measure(super::timing::Call::ResourceReplacementWait, || unsafe {
+                        sceGxmNotificationWait(&SceGxmNotification {
+                            address: token.address,
+                            value: token.value,
+                        })
+                    }),
+            )?;
         }
         Ok(())
     }
@@ -683,7 +699,12 @@ impl Context {
             address: unsafe { sceGxmGetNotificationRegion().add(r.slot) },
             value: r.notification,
         };
-        let code = unsafe { sceGxmEndScene(self.0.core.native.context, core::ptr::null(), &n) };
+        let code = self
+            .0
+            .timing
+            .measure(super::timing::Call::SceneEnd, || unsafe {
+                sceGxmEndScene(self.0.core.native.context, core::ptr::null(), &n)
+            });
         if let Err(e) = self.command("sceGxmEndScene", code) {
             core::mem::forget(r);
             return Err(e);
@@ -784,6 +805,7 @@ impl Context {
         let s = self.0.state.borrow();
         let n = &self.0.core.native;
         Ok(MemoryUsage {
+            submission_timing: self.0.timing.snapshot(),
             pixels: self.0.core.pixels.usage(),
             buffers: self.0.core.buffers.usage(),
             parameter_cdram_bytes: self.0.core.config.parameter_bytes.into(),
