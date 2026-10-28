@@ -24,6 +24,8 @@ pub enum Error {
         /// Configured maximum capacity for this domain.
         limit: u64,
     },
+    /// Caller-supplied MAIN physical budget rejected an allocation.
+    Admission(crate::memory::MemoryBudgetError),
     /// Native construction failed before submission.
     Sdk(&'static str, i32),
     /// A submitted/native ownership operation failed; owners remain retained.
@@ -76,11 +78,25 @@ pub struct DriverInfo {
     /// Offline shader profiles consumed by this device.
     pub shading_language: String,
 }
+/// Physical location of an owned sampled texture.
+/// Both domains are GPU-cached; MAIN allocations bypass the CPU cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureMemory {
+    /// High-bandwidth memory for repeatedly sampled or GPU-written pixels.
+    Cdram,
+    /// Uncached main memory for source assets, sharing bandwidth with the CPU.
+    Main,
+}
 /// Fixed infrastructure budgets. Pixel/buffer arenas grow by suballocated blocks.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
-    /// Maximum kernel capacity retained by each suballocation domain.
+    /// CDRAM texture/target capacity, excluding scanout and the parameter buffer.
+    /// The default 88 MiB leaves 8 MiB for scanout and 16 MiB for parameters.
     pub pixel_arena_bytes: u64,
+    /// Uncached MAIN texture capacity, independent of geometry and staging.
+    pub main_texture_arena_bytes: u64,
+    /// Idle MAIN texture blocks retained within main_texture_arena_bytes.
+    pub main_texture_retained_bytes: u64,
     /// Reserved uncached LPDDR cap for geometry and upload staging; default 16 MiB.
     pub buffer_arena_bytes: u64,
     /// Strongly retained pixel block capacity, included in pixel_arena_bytes.
@@ -115,7 +131,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            pixel_arena_bytes: 96 * 1024 * 1024,
+            pixel_arena_bytes: 88 * 1024 * 1024,
+            main_texture_arena_bytes: 64 * 1024 * 1024,
+            main_texture_retained_bytes: 8 * 1024 * 1024,
             buffer_arena_bytes: 16 * 1024 * 1024,
             pixel_retained_bytes: 8 * 1024 * 1024,
             buffer_retained_bytes: 1024 * 1024,
@@ -182,6 +200,8 @@ pub struct MemoryUsage {
     pub submission_timing: SubmissionTiming,
     /// Caller texture/target CDRAM arena; excludes scanout and parameter memory.
     pub pixels: ArenaUsage,
+    /// Owned sampled textures in uncached MAIN; excludes imported media aliases.
+    pub main_textures: ArenaUsage,
     /// Geometry and transfer staging arena; includes upload_staging_bytes.
     pub buffers: ArenaUsage,
     /// libgxm parameter-buffer reservation requested at initialization.
@@ -217,6 +237,15 @@ pub struct MemoryUsage {
     /// Successfully completed display callbacks.
     pub display_flips: u64,
 }
+/// Color surface storage used by render-target admission and allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetFormat {
+    /// Four unsigned normalized color components in byte-order RGBA.
+    Rgba8,
+    /// One unsigned normalized coverage component, written and sampled as alpha.
+    Coverage8,
+}
+
 /// Sample/storage formats. Luma formats retain the GLES `.r` / `.ra` contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextureFormat {
@@ -228,6 +257,8 @@ pub enum TextureFormat {
     Rgba16Float,
     /// One byte replicated to RGB with alpha one.
     Luma8,
+    /// One byte replicated to RGBA, preserving alpha and red coverage consumers.
+    Coverage8,
     /// Two bytes sampled as (R,R,R,G), preserving .ra for NV12 chroma.
     LumaAlpha8,
     /// Portable row-major BC1 blocks, sampled with opaque alpha.
@@ -238,7 +269,7 @@ pub enum TextureFormat {
 impl TextureFormat {
     pub(crate) fn pixel_bytes(self) -> usize {
         match self {
-            Self::Luma8 => 1,
+            Self::Luma8 | Self::Coverage8 => 1,
             Self::LumaAlpha8 => 2,
             Self::Rgba16Float => 8,
             _ => 4,
@@ -288,9 +319,21 @@ pub struct VertexAttribute {
     pub offset: u32,
 }
 
+/// One interleaved f32 stream. Instance layouts use the hardware's 16-bit
+/// instance index; a draw range contains at most 65,535 instances.
+#[derive(Clone, Copy)]
+pub struct VertexLayout<'a> {
+    /// Distance between records, in f32 elements.
+    pub stride: u32,
+    /// Component count and element offset for each reflected location.
+    pub attributes: &'a [VertexAttribute],
+}
+
 /// Offline stages and the caller's interleaved f32 vertex interface.
 #[derive(Clone, Copy)]
 pub struct ProgramDescriptor<'a> {
+    /// Fragment output contract matching the supplied GXP entry point.
+    pub output: FragmentOutput,
     /// Compiled vertex stage.
     pub vertex: ShaderCode<'a>,
     /// Compiled fragment stage.
@@ -301,6 +344,9 @@ pub struct ProgramDescriptor<'a> {
     pub stride: u32,
     /// Component count and element offset for each location.
     pub attributes: &'a [VertexAttribute],
+    /// Optional second stream, indexed once per instance rather than per vertex.
+    /// Its attribute locations must be distinct from the vertex stream.
+    pub instance: Option<VertexLayout<'a>>,
     /// Optional float4 fragment uniform receiving half-open pixel clip bounds.
     /// The fragment program must discard pixels outside this rectangle.
     /// Without it, internal scissor edges must be aligned to 32-pixel tiles.
@@ -320,6 +366,17 @@ pub struct ClearProgram<'a> {
     pub color_uniform: &'a str,
     /// Name of the fragment float4 half-open pixel clip uniform.
     pub clip_uniform: &'a str,
+}
+
+/// How a fragment program produces the final color-surface value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FragmentOutput {
+    /// The SDK patches RGBA8 replacement and premultiplied source-over variants.
+    #[default]
+    Patched,
+    /// The GXP uses `__nativecolor` and declares its output register format.
+    /// The shader owns blending; draws must use `Blend::Replace`.
+    Declared,
 }
 
 /// Whether a rectangle needs fragment clipping in addition to GXM tile clipping.

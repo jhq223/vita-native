@@ -1,5 +1,6 @@
 //! Host lifecycle checks execute the production pool against an in-memory kernel
 //! allocator. SDK mapping and DMA remain covered by Vita target compilation.
+use vita_native::memory;
 #[allow(dead_code)]
 #[path = "../src/app/memory.rs"]
 mod layout;
@@ -15,7 +16,11 @@ mod app {
                 layout: MemoryLayout,
                 budget: &dyn MemoryBudget,
             ) -> Result<Self, String> {
-                let ticket = budget.reserve(layout.bytes())?;
+                let class = match layout.kind() {
+                    MemoryKind::Heap => crate::memory::MemoryClass::Heap,
+                    MemoryKind::PhysicalUncached => crate::memory::MemoryClass::ContiguousKernel,
+                };
+                let ticket = budget.reserve(class, layout.bytes())?;
                 crate::allocation_boundary()?;
                 Ok(Self {
                     bytes: vec![0; layout.bytes() as usize].into_boxed_slice(),
@@ -36,7 +41,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 #[derive(Default)]
-struct Budget(Arc<AtomicUsize>);
+struct Budget(Arc<AtomicUsize>, AtomicUsize);
 struct Ticket(Arc<AtomicUsize>, usize);
 impl Drop for Ticket {
     fn drop(&mut self) {
@@ -44,7 +49,19 @@ impl Drop for Ticket {
     }
 }
 impl layout::MemoryBudget for Budget {
-    fn reserve(&self, bytes: u64) -> Result<Box<dyn layout::MemoryReservation>, String> {
+    fn reserve(
+        &self,
+        class: vita_native::memory::MemoryClass,
+        bytes: u64,
+    ) -> Result<Box<dyn layout::MemoryReservation>, vita_native::memory::MemoryBudgetError> {
+        let kind = match class {
+            vita_native::memory::MemoryClass::Heap => 1,
+            vita_native::memory::MemoryClass::ContiguousKernel => 2,
+            vita_native::memory::MemoryClass::MainKernel => {
+                panic!("unexpected ordinary MAIN block")
+            }
+        };
+        self.1.fetch_or(kind, Ordering::SeqCst);
         self.0.fetch_add(bytes as usize, Ordering::SeqCst);
         Ok(Box::new(Ticket(self.0.clone(), bytes as usize)))
     }
@@ -58,6 +75,11 @@ fn sealed_readers_and_simulated_flight_delay_pool_reuse_without_extra_copy() {
     assert_eq!(writable.layout().bytes, 783360);
     writable.planes_mut().0[0] = 73;
     let shared = writable.seal();
+    assert_eq!(
+        budget.1.load(Ordering::SeqCst),
+        3,
+        "metadata and NV12 use distinct allocation classes"
+    );
     let address = shared.pointer();
     let flight = shared.clone();
     let reader = std::thread::spawn(move || {
@@ -148,13 +170,12 @@ fn allocation_boundary() -> Result<(), String> {
     }
     Ok(())
 }
-fn pause_next_acquire(
-    pool: Arc<Nv12Pool>,
-) -> (
+type PausedAcquire = (
     std::sync::mpsc::Receiver<()>,
     std::sync::mpsc::Sender<bool>,
     std::thread::JoinHandle<Result<Option<Nv12Buffer>, String>>,
-) {
+);
+fn pause_next_acquire(pool: Arc<Nv12Pool>) -> PausedAcquire {
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (resume_tx, resume_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {

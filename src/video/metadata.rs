@@ -276,7 +276,7 @@ pub(super) fn read<R: Read + Seek + ?Sized>(
             {
                 return Err("MP4 avcC sequence parameter set is truncated".into());
             }
-            let sps_storage = budget.reserve(sps_size as u64)?;
+            let sps_storage = budget.reserve(crate::memory::MemoryClass::Heap, sps_size as u64)?;
             let mut sps = Vec::new();
             sps.try_reserve_exact(sps_size).map_err(|e| e.to_string())?;
             sps.resize(sps_size, 0);

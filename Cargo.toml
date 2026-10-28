@@ -9,11 +9,12 @@ repository = "https://github.com/jhq223/vita-native"
 
 [features]
 profiling = []
+process-allocator = ["app"]
 default = ["app", "graphics", "audio"]
-app = ["dep:vitasdk-sys", "vitasdk-sys/SceLibKernel_stub", "vitasdk-sys/SceKernelThreadMgr_stub", "vitasdk-sys/SceProcessmgr_stub", "vitasdk-sys/SceRtc_stub", "vitasdk-sys/SceCtrl_stub", "vitasdk-sys/SceTouch_stub", "vitasdk-sys/ScePower_stub", "vitasdk-sys/SceIofilemgr_stub", "vitasdk-sys/SceSysmem_stub", "vitasdk-sys/SceAppMgr_stub", "vitasdk-sys/SceIme_stub"]
+app = ["dep:vitasdk-sys", "vitasdk-sys/SceLibKernel_stub", "vitasdk-sys/SceKernelThreadMgr_stub", "vitasdk-sys/SceProcessmgr_stub", "vitasdk-sys/SceRtc_stub", "vitasdk-sys/SceCtrl_stub", "vitasdk-sys/SceTouch_stub", "vitasdk-sys/ScePower_stub", "vitasdk-sys/SceIofilemgr_stub", "vitasdk-sys/SceSysmem_stub", "vitasdk-sys/SceAppMgr_stub", "vitasdk-sys/SceIme_stub", "vitasdk-sys/SceSysmodule_stub"]
 graphics = ["dep:vitasdk-sys", "vitasdk-sys/SceLibKernel_stub", "vitasdk-sys/SceKernelThreadMgr_stub", "vitasdk-sys/SceSysmem_stub", "vitasdk-sys/SceGxm_stub", "vitasdk-sys/SceDisplay_stub", "vitasdk-sys/SceKernelDmacMgr_stub"]
 audio = ["app", "vitasdk-sys/SceAudio_stub"]
-video = ["app", "vitasdk-sys/SceSysmodule_stub", "vitasdk-sys/SceAvPlayer_stub"]
+video = ["app", "vitasdk-sys/SceAvPlayer_stub", "vitasdk-sys/SceKernelDmacMgr_stub"]
 
 [target.'cfg(target_os = "vita")'.dependencies]
 vitasdk-sys = { version = "=0.3.3", optional = true }
@@ -23,3 +24,6 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [profile.release]
 lto = "thin"
+
+[build-dependencies]
+cc = "=1.8.0"

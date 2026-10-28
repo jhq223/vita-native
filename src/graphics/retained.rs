@@ -22,15 +22,23 @@ impl<T> Retained<T> {
         }
         self.entries.push((value.clone(), bytes));
     }
-    pub fn release_idle(&mut self) {
+    pub fn release_idle(&mut self) -> u64 {
+        let before = self.bytes();
         self.entries
             .retain(|(value, _)| Rc::strong_count(value) != 1);
+        before - self.bytes()
     }
     pub fn clear(&mut self) {
         self.entries.clear();
     }
     pub fn bytes(&self) -> u64 {
         self.entries.iter().map(|(_, bytes)| bytes).sum()
+    }
+}
+
+impl<T> super::pressure::IdlePool for std::cell::RefCell<Retained<T>> {
+    fn release_idle(&self) -> u64 {
+        self.borrow_mut().release_idle()
     }
 }
 

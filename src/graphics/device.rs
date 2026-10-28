@@ -25,6 +25,7 @@ struct DisplayState {
     completed: AtomicU32,
     flips: AtomicU32,
     error: AtomicI32,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 #[repr(C)]
 struct DisplayData {
@@ -69,6 +70,9 @@ unsafe extern "C" fn display_callback(data: *const core::ffi::c_void) {
         state.flips.fetch_add(1, Ordering::Relaxed);
     }
     state.completed.store(d.serial, Ordering::Release);
+    if let Some(wake) = &state.wake {
+        wake();
+    }
 }
 unsafe extern "C" fn host_alloc(_: *mut core::ffi::c_void, size: u32) -> *mut core::ffi::c_void {
     let size = size as usize;
@@ -107,7 +111,12 @@ pub(super) struct Native {
     closed: bool,
 }
 impl Native {
-    fn new(config: Config, fault: &Fault) -> Result<Self> {
+    fn new(
+        config: Config,
+        fault: &Fault,
+        pressure: &super::pressure::Pressure,
+        wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Result<Self> {
         if crate::graphics_active::ACTIVE
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
@@ -119,7 +128,10 @@ impl Native {
             patcher: core::ptr::null_mut(),
             host: ManuallyDrop::new(std::vec![0;SCE_GXM_MINIMUM_CONTEXT_HOST_MEM_SIZE as usize/8]),
             blocks: Vec::new(),
-            display: ManuallyDrop::new(Box::default()),
+            display: ManuallyDrop::new(Box::new(DisplayState {
+                wake,
+                ..Default::default()
+            })),
             fault: fault.clone(),
             active: true,
             initialized: false,
@@ -143,7 +155,8 @@ impl Native {
             (config.patcher_vertex_usse_bytes, Kind::VertexUsse),
             (config.patcher_fragment_usse_bytes, Kind::FragmentUsse),
         ] {
-            n.blocks.push(Block::new(bytes as usize, kind, fault)?);
+            n.blocks
+                .push(Block::new(bytes as usize, kind, fault, pressure)?);
         }
         let b = &n.blocks;
         let params = SceGxmContextParams {
@@ -247,7 +260,9 @@ impl Drop for Native {
     }
 }
 pub(super) struct Core {
+    pub pressure: super::pressure::Pressure,
     pub pixels: Arena,
+    pub main_textures: Arena,
     pub display_pixels: Arena,
     pub buffers: Arena,
     pub native: Native,
@@ -310,7 +325,7 @@ pub(super) struct Inner {
     pub core: Rc<Core>,
     pub state: RefCell<State>,
     pub screens: RefCell<Vec<Framebuffer>>,
-    pub targets: RefCell<super::render_targets::Pool<super::render_targets::RenderTarget>>,
+    pub targets: Rc<RefCell<super::render_targets::Pool<super::render_targets::RenderTarget>>>,
     #[cfg(feature = "video")]
     pub video_imports: RefCell<Vec<std::rc::Weak<super::video::Import>>>,
     pub vsync: Cell<bool>,
@@ -354,11 +369,26 @@ impl Fence {
 }
 impl Context {
     /// Create a GXM device and three process-sized scanout buffers.
-    pub fn new(vsync: bool, clear: ClearProgram<'_>) -> Result<Self> {
-        Self::with_config(Config::default(), vsync, clear)
+    pub fn new(
+        vsync: bool,
+        clear: ClearProgram<'_>,
+        main_budget: Option<Arc<dyn crate::memory::MemoryBudget>>,
+    ) -> Result<Self> {
+        Self::with_config(Config::default(), vsync, clear, None, main_budget)
     }
-    /// Select explicit infrastructure and render-target scheduling budgets.
-    pub fn with_config(config: Config, vsync: bool, clear: ClearProgram<'_>) -> Result<Self> {
+    /// Select infrastructure budgets and an optional display-completion wake callback.
+    /// The callback runs after completion is published, including display errors.
+    /// It must return promptly without panicking or issuing graphics commands.
+    /// The device owns it until all display callbacks have finished during close.
+    /// MAIN kernel blocks retain their optional caller-supplied budget reservation
+    /// until physical release; CDRAM allocations use their separate limits.
+    pub fn with_config(
+        config: Config,
+        vsync: bool,
+        clear: ClearProgram<'_>,
+        wake: Option<Arc<dyn Fn() + Send + Sync>>,
+        main_budget: Option<Arc<dyn crate::memory::MemoryBudget>>,
+    ) -> Result<Self> {
         // Sony gxm/defs.h: SCE_GXM_MAX_SCENES_PER_RENDERTARGET (absent from VitaSDK bindings).
         if config.scenes_per_frame == 0
             || config.scenes_per_frame > 8
@@ -377,23 +407,50 @@ impl Context {
             return Err(Error::Invalid("GXM configuration"));
         }
         let fault = Fault::default();
-        let native = Native::new(config, &fault)?;
+        let pressure = super::pressure::Pressure::new(main_budget);
+        let native = Native::new(config, &fault, &pressure, wake)?;
+        let targets = Rc::new(RefCell::new(super::render_targets::Pool::new(
+            config
+                .render_target_retained_bytes
+                .min(config.render_target_bytes),
+        )));
+        pressure.register(super::pressure::Domain::Main, &targets);
         let core = Rc::new(Core {
             native,
             pixels: Arena::new(
+                "native CDRAM pixels",
                 Kind::Cdram,
                 &fault,
+                &pressure,
                 config.pixel_arena_bytes,
                 config.pixel_retained_bytes,
             ),
-            display_pixels: Arena::new(Kind::Cdram, &fault, 8 * 1024 * 1024, 0),
-            buffers: Arena::new(
+            main_textures: Arena::new(
+                "native MAIN textures",
                 Kind::Uncached,
                 &fault,
+                &pressure,
+                config.main_texture_arena_bytes,
+                config.main_texture_retained_bytes,
+            ),
+            display_pixels: Arena::new(
+                "native scanout",
+                Kind::Cdram,
+                &fault,
+                &pressure,
+                8 * 1024 * 1024,
+                0,
+            ),
+            buffers: Arena::new(
+                "native buffers",
+                Kind::Uncached,
+                &fault,
+                &pressure,
                 config.buffer_arena_bytes,
                 config.buffer_retained_bytes,
             ),
             fault,
+            pressure,
             config,
             caps: Capabilities {
                 max_texture_size: 4096,
@@ -428,11 +485,7 @@ impl Context {
             screens: RefCell::new(Vec::new()),
             #[cfg(feature = "video")]
             video_imports: RefCell::new(Vec::new()),
-            targets: RefCell::new(super::render_targets::Pool::new(
-                config
-                    .render_target_retained_bytes
-                    .min(config.render_target_bytes),
-            )),
+            targets,
             vsync: Cell::new(vsync),
             clear: RefCell::new(None),
             bound_program: RefCell::new(None),
@@ -784,6 +837,7 @@ impl Context {
         Ok(MemoryUsage {
             submission_timing: self.0.timing.snapshot(),
             pixels: self.0.core.pixels.usage(),
+            main_textures: self.0.core.main_textures.usage(),
             buffers: self.0.core.buffers.usage(),
             parameter_cdram_bytes: self.0.core.config.parameter_bytes.into(),
             context_ring_bytes: n.blocks.iter().take(4).map(|b| b.bytes as u64).sum(),
@@ -841,11 +895,12 @@ impl Context {
         let inner = Rc::get_mut(&mut self.0).expect("unique context");
         inner.clear.get_mut().take();
         inner.screens.get_mut().clear();
-        inner.targets.get_mut().clear();
+        inner.targets.borrow_mut().clear();
         inner.identity.get_mut().take();
         inner.state.get_mut().last = None;
         let core = Rc::get_mut(&mut inner.core).expect("all external device owners released");
         core.pixels.release_idle();
+        core.main_textures.release_idle();
         core.display_pixels.release_idle();
         core.buffers.release_idle();
         if let Err(e) = core.native.close() {

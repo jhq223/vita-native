@@ -38,6 +38,10 @@ impl Texture {
     pub fn format(&self) -> TextureFormat {
         self.0.format
     }
+    /// Physical allocation domain, retained across uploads and aliases.
+    pub fn memory(&self) -> super::TextureMemory {
+        self.0.allocation.memory()
+    }
     /// Number of stored levels, including the base.
     pub fn mip_count(&self) -> u32 {
         self.0.mip_count
@@ -104,6 +108,7 @@ pub(super) fn texture_format(f: TextureFormat) -> u32 {
         TextureFormat::Bgra8 => SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ARGB,
         TextureFormat::Rgba16Float => SCE_GXM_TEXTURE_FORMAT_F16F16F16F16_ABGR,
         TextureFormat::Luma8 => SCE_GXM_TEXTURE_FORMAT_U8_1RRR,
+        TextureFormat::Coverage8 => SCE_GXM_TEXTURE_FORMAT_U8_RRRR,
         TextureFormat::LumaAlpha8 => SCE_GXM_TEXTURE_FORMAT_U8U8_GRRR,
         TextureFormat::Bc1Rgb => SCE_GXM_TEXTURE_FORMAT_UBC1_1BGR,
         TextureFormat::Bc3Rgba => SCE_GXM_TEXTURE_FORMAT_UBC3_ABGR,
@@ -128,15 +133,19 @@ impl Context {
     pub fn texture_layout(&self, size: [u32; 2], format: TextureFormat) -> Result<TextureLayout> {
         texture_layout(size, format)
     }
-    /// Tight strided RGBA8 target storage, with the color surface's two-pixel pitch alignment.
-    pub fn target_layout(&self, size: [u32; 2]) -> Result<TargetLayout> {
-        target_layout(size)
+    /// Strided color storage including format-specific surface and texture pitch alignment.
+    pub fn target_layout(&self, size: [u32; 2], format: TargetFormat) -> Result<TargetLayout> {
+        target_layout(size, format)
     }
     /// Query one shared scheduling class with the configured scene capacity.
     /// Color storage retains its exact extent; compatible surfaces share driver bytes.
-    pub fn target_footprint(&self, size: [u32; 2]) -> Result<TargetFootprint> {
+    pub fn target_footprint(
+        &self,
+        size: [u32; 2],
+        format: TargetFormat,
+    ) -> Result<TargetFootprint> {
         self.check("target footprint")?;
-        let texture = self.target_layout(size)?;
+        let texture = self.target_layout(size, format)?;
         let mut bytes = 0;
         sdk("sceGxmGetRenderTargetMemSize", unsafe {
             sceGxmGetRenderTargetMemSize(
@@ -159,10 +168,16 @@ impl Context {
         strided: bool,
         display: bool,
         mip_count: u32,
+        memory: super::TextureMemory,
     ) -> Result<Texture> {
         self.check("texture creation")?;
         let l = if strided {
-            let l = self.target_layout(size)?;
+            let target_format = match format {
+                TextureFormat::Rgba8 | TextureFormat::Bgra8 => TargetFormat::Rgba8,
+                TextureFormat::Coverage8 => TargetFormat::Coverage8,
+                _ => return Err(Error::Unsupported("strided target format")),
+            };
+            let l = self.target_layout(size, target_format)?;
             TextureLayout {
                 bytes: l.texture_bytes as usize,
                 row_stride_bytes: l.row_stride_bytes as usize,
@@ -173,7 +188,10 @@ impl Context {
         let arena = if display {
             &self.0.core.display_pixels
         } else {
-            &self.0.core.pixels
+            match memory {
+                super::TextureMemory::Cdram => &self.0.core.pixels,
+                super::TextureMemory::Main => &self.0.core.main_textures,
+            }
         };
         let allocation = arena.alloc(l.bytes, 256)?;
         let mut raw = unsafe { core::mem::zeroed() };
@@ -226,8 +244,13 @@ impl Context {
         })))
     }
     /// Allocate an ordinary sampled texture with the pure `texture_layout` contract.
-    pub fn create_texture(&self, size: [u32; 2], format: TextureFormat) -> Result<Texture> {
-        self.allocate_texture(size, format, false, false, 1)
+    pub fn create_texture(
+        &self,
+        size: [u32; 2],
+        format: TextureFormat,
+        memory: super::TextureMemory,
+    ) -> Result<Texture> {
+        self.allocate_texture(size, format, false, false, 1, memory)
     }
     /// Allocate a complete sampled chain; count includes the base level (SDK mipCount).
     pub fn create_mip_texture(
@@ -235,8 +258,9 @@ impl Context {
         size: [u32; 2],
         format: TextureFormat,
         count: u32,
+        memory: super::TextureMemory,
     ) -> Result<Texture> {
-        self.allocate_texture(size, format, false, false, count)
+        self.allocate_texture(size, format, false, false, count, memory)
     }
     /// Write rows of an ordinary uncompressed sampled mip texture after its readers finish.
     /// Source bytes are consumed synchronously; padding follows the native mip layout.
@@ -272,11 +296,28 @@ impl Context {
         Ok(())
     }
     /// Allocate the same explicit row pitch reported by `target_layout`.
-    pub fn create_target_texture(&self, size: [u32; 2]) -> Result<Texture> {
-        self.allocate_texture(size, TextureFormat::Rgba8, true, false, 1)
+    pub fn create_target_texture(&self, size: [u32; 2], format: TargetFormat) -> Result<Texture> {
+        self.allocate_texture(
+            size,
+            match format {
+                TargetFormat::Rgba8 => TextureFormat::Rgba8,
+                TargetFormat::Coverage8 => TextureFormat::Coverage8,
+            },
+            true,
+            false,
+            1,
+            super::TextureMemory::Cdram,
+        )
     }
     pub(super) fn create_display_texture(&self, size: [u32; 2]) -> Result<Texture> {
-        self.allocate_texture(size, TextureFormat::Rgba8, true, true, 1)
+        self.allocate_texture(
+            size,
+            TextureFormat::Rgba8,
+            true,
+            true,
+            1,
+            super::TextureMemory::Cdram,
+        )
     }
     /// Reorder row-major BC blocks directly into final mapped Morton storage.
     pub fn create_bc_texture(
@@ -284,11 +325,12 @@ impl Context {
         size: [u32; 2],
         format: TextureFormat,
         blocks: &[u8],
+        memory: super::TextureMemory,
     ) -> Result<Texture> {
         if !format.compressed() {
             return Err(Error::Invalid("BC format"));
         }
-        let texture = self.create_texture(size, format)?;
+        let texture = self.create_texture(size, format, memory)?;
         self.upload_bc_texture(&texture, blocks)?;
         Ok(texture)
     }
@@ -398,7 +440,7 @@ impl Context {
             .0
             .core
             .buffers
-            .alloc(stage_stride * size[1] as usize, 16)?;
+            .upload(stage_stride * size[1] as usize, 16)?;
         for y in 0..size[1] as usize {
             stage.write(y * stage_stride, &data[y * stride..y * stride + row]);
         }
@@ -538,23 +580,28 @@ impl Context {
         let format = match t.format() {
             TextureFormat::Rgba8 => SCE_GXM_COLOR_FORMAT_A8B8G8R8,
             TextureFormat::Bgra8 => SCE_GXM_COLOR_FORMAT_A8R8G8B8,
+            TextureFormat::Coverage8 => SCE_GXM_COLOR_FORMAT_U8_A,
             _ => return Err(Error::Unsupported("framebuffer color format")),
         };
+        let target_format = if t.format() == TextureFormat::Coverage8 {
+            TargetFormat::Coverage8
+        } else {
+            TargetFormat::Rgba8
+        };
         let bytes = self
-            .target_footprint(t.size())?
+            .target_footprint(t.size(), target_format)?
             .render_target_driver_bytes
             .unwrap();
-        let mut pool = self.0.targets.borrow_mut();
-        if !pool.contains(t.size())?
+        if !self.0.targets.borrow().contains(t.size())?
             && self.0.core.rt_bytes.get().saturating_add(bytes)
                 > self.0.core.config.render_target_bytes
         {
-            pool.release_idle();
+            self.0.targets.borrow_mut().release_idle();
         }
-        let target = pool.get_or_create(t.size(), bytes, |size| {
-            RenderTarget::new(&self.0.core, size)
-        })?;
-        drop(pool);
+        let target =
+            super::render_targets::Pool::get_or_create(&self.0.targets, t.size(), bytes, |size| {
+                RenderTarget::new(&self.0.core, size)
+            })?;
         let mut surface = unsafe { core::mem::zeroed() };
         sdk("sceGxmColorSurfaceInit", unsafe {
             sceGxmColorSurfaceInit(
@@ -565,7 +612,7 @@ impl Context {
                 SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT,
                 t.size()[0],
                 t.size()[1],
-                (t.0.layout.row_stride_bytes / 4) as u32,
+                (t.0.layout.row_stride_bytes / t.format().pixel_bytes()) as u32,
                 t.0.allocation.ptr().cast(),
             )
         })?;
@@ -756,24 +803,30 @@ impl Context {
         b.maximum = maximum;
         Ok(())
     }
-    /// Capture top-left visible RGBA rows after this target's users complete.
-    pub fn read_rgba(&self, target: &Framebuffer, output: &mut [u8]) -> Result<()> {
+    /// Copy consecutive top-left visible RGBA rows after this target's users complete.
+    /// `first_row` and the number of rows in `output` must fit the target.
+    pub fn read_rgba(&self, target: &Framebuffer, first_row: u32, output: &mut [u8]) -> Result<()> {
         self.same(&target.0.owner)?;
+        let row = target.size()[0] as usize * 4;
+        let rows = output.len().checked_div(row).unwrap_or(0);
         if target.texture().format() != TextureFormat::Rgba8
-            || output.len() != target.size()[0] as usize * target.size()[1] as usize * 4
+            || row == 0
+            || !output.len().is_multiple_of(row)
+            || (first_row as usize)
+                .checked_add(rows)
+                .is_none_or(|end| end > target.size()[1] as usize)
         {
             return Err(Error::Invalid("capture extent"));
         }
         let t = &target.0.texture;
         self.await_allocation(&t.0.allocation)?;
-        let row = target.size()[0] as usize * 4;
         for (y, dest) in output.chunks_exact_mut(row).enumerate() {
             let source = unsafe {
                 core::slice::from_raw_parts(
                     t.0.allocation
                         .ptr()
                         .cast::<u8>()
-                        .add(y * t.0.layout.row_stride_bytes),
+                        .add((first_row as usize + y) * t.0.layout.row_stride_bytes),
                     row,
                 )
             };

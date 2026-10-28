@@ -1,6 +1,10 @@
 //! Device-independent input, layout and bounded MP4 metadata checks.
 #[path = "../src/app/memory.rs"]
-pub mod memory;
+pub mod layout;
+pub mod memory {
+    pub use crate::layout::{MemoryKind, MemoryLayout};
+    pub use vita_native::memory::{MemoryBudget, MemoryClass, MemoryReservation};
+}
 mod app {
     pub use crate::memory;
 }
@@ -37,9 +41,15 @@ impl Drop for Lease {
     }
 }
 impl memory::MemoryBudget for Budget {
-    fn reserve(&self, bytes: u64) -> Result<Box<dyn memory::MemoryReservation>, String> {
+    fn reserve(
+        &self,
+        _: vita_native::memory::MemoryClass,
+        bytes: u64,
+    ) -> Result<Box<dyn memory::MemoryReservation>, vita_native::memory::MemoryBudgetError> {
         if bytes > self.limit {
-            return Err("test metadata budget exceeded".into());
+            return Err(vita_native::memory::MemoryBudgetError::Capacity(
+                "test metadata budget exceeded".into(),
+            ));
         }
         self.live.fetch_add(bytes as usize, Ordering::Relaxed);
         Ok(Box::new(Lease {

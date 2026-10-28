@@ -44,6 +44,7 @@ impl Drop for Binary {
     }
 }
 pub(super) struct ProgramInner {
+    pub output: FragmentOutput,
     vertex_code: Binary,
     fragment_code: Binary,
     vertex_id: SceGxmShaderPatcherId,
@@ -55,6 +56,7 @@ pub(super) struct ProgramInner {
     pub texture_slots: usize,
     pub stride: u32,
     pub attributes: Vec<VertexAttribute>,
+    pub instance: Option<(u32, Vec<VertexAttribute>)>,
     pub owner: Rc<Core>,
 }
 impl Drop for ProgramInner {
@@ -276,27 +278,23 @@ impl<'a> UniformValue<'a> {
     }
 }
 impl Context {
-    /// Patch both index widths and both blend modes once. Stride and offsets use f32 elements.
+    /// Prepare both index widths and the declared fragment output contract.
+    /// Patched output supports both blend modes; declared output owns blending.
+    /// Stride and offsets use f32 elements.
     pub fn create_program(&self, descriptor: ProgramDescriptor<'_>) -> Result<Program> {
         let ProgramDescriptor {
+            output,
             vertex,
             fragment,
             bindings,
             stride,
             attributes,
+            instance,
             clip_uniform,
         } = descriptor;
         self.check("program creation")?;
-        if stride == 0
-            || stride > 16383
-            || attributes.iter().any(|a| {
-                a.location >= 16
-                    || a.components == 0
-                    || a.components > 4
-                    || a.offset
-                        .checked_add(a.components)
-                        .is_none_or(|v| v > stride)
-            })
+        if !super::vertex_layout::valid(stride, attributes)
+            || instance.is_some_and(|layout| !super::vertex_layout::compatible(attributes, layout))
         {
             return Err(Error::Invalid("program vertex layout"));
         }
@@ -347,6 +345,7 @@ impl Context {
             .max()
             .unwrap_or(0);
         let mut inner = ProgramInner {
+            output,
             uniform_sizes,
             texture_slots,
             vertex_code: v,
@@ -358,6 +357,7 @@ impl Context {
             clip,
             stride,
             attributes: attributes.to_vec(),
+            instance: instance.map(|layout| (layout.stride, layout.attributes.to_vec())),
             owner: self.0.core.clone(),
         };
         let p = self.0.core.native.patcher;
@@ -367,7 +367,9 @@ impl Context {
         sdk("register fragment GXP", unsafe {
             sceGxmShaderPatcherRegisterProgram(p, inner.fragment_code.ptr(), &mut inner.fragment_id)
         })?;
-        let mut native_attributes = Vec::with_capacity(attributes.len());
+        let mut native_attributes = Vec::with_capacity(
+            attributes.len() + instance.map_or(0, |layout| layout.attributes.len()),
+        );
         for b in bindings {
             let name = CString::new(b.name).map_err(|_| Error::Invalid("attribute name"))?;
             let param =
@@ -380,12 +382,22 @@ impl Context {
             {
                 return Err(Error::Invalid("vertex input category"));
             }
-            let a = attributes
+            let (stream, a) = attributes
                 .iter()
                 .find(|a| a.location == b.location)
+                .map(|a| (0, a))
+                .or_else(|| {
+                    instance.and_then(|layout| {
+                        layout
+                            .attributes
+                            .iter()
+                            .find(|a| a.location == b.location)
+                            .map(|a| (1, a))
+                    })
+                })
                 .ok_or(Error::Invalid("vertex attribute binding"))?;
             native_attributes.push(SceGxmVertexAttribute {
-                streamIndex: 0,
+                streamIndex: stream,
                 offset: (a.offset * 4) as u16,
                 format: SCE_GXM_ATTRIBUTE_FORMAT_F32 as u8,
                 componentCount: a.components as u8,
@@ -399,23 +411,34 @@ impl Context {
         .into_iter()
         .enumerate()
         {
-            let stream = SceGxmVertexStream {
-                stride: (stride * 4) as u16,
-                indexSource: source as u16,
-            };
+            let streams = [
+                SceGxmVertexStream {
+                    stride: (stride * 4) as u16,
+                    indexSource: source as u16,
+                },
+                SceGxmVertexStream {
+                    stride: (instance.map_or(0, |layout| layout.stride) * 4) as u16,
+                    indexSource: SCE_GXM_INDEX_SOURCE_INSTANCE_16BIT as u16,
+                },
+            ];
             sdk("patch vertex GXP", unsafe {
                 sceGxmShaderPatcherCreateVertexProgram(
                     p,
                     inner.vertex_id,
                     native_attributes.as_ptr(),
                     native_attributes.len() as u32,
-                    &stream,
-                    1,
+                    streams.as_ptr(),
+                    if instance.is_some() { 2 } else { 1 },
                     &mut inner.vertex[index],
                 )
             })?;
         }
-        for blend in 0..2 {
+        let variants = if output == FragmentOutput::Declared {
+            1
+        } else {
+            2
+        };
+        for blend in 0..variants {
             let mut info: SceGxmBlendInfo = unsafe { core::mem::zeroed() };
             info.colorMask = SCE_GXM_COLOR_MASK_ALL as u8;
             info.set_colorFunc(if blend == 0 {
@@ -444,9 +467,17 @@ impl Context {
                 sceGxmShaderPatcherCreateFragmentProgram(
                     p,
                     inner.fragment_id,
-                    SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
+                    if output == FragmentOutput::Declared {
+                        SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED
+                    } else {
+                        SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4
+                    },
                     SCE_GXM_MULTISAMPLE_NONE,
-                    &info,
+                    if output == FragmentOutput::Declared {
+                        core::ptr::null()
+                    } else {
+                        &info
+                    },
                     inner.vertex_code.ptr(),
                     &mut inner.fragment[blend],
                 )

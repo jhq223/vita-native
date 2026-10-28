@@ -85,7 +85,7 @@ impl Nv12Pool {
                 * (std::mem::size_of::<MemoryBlock>()
                     + std::mem::size_of::<Sealed>()
                     + 2 * std::mem::size_of::<usize>());
-        let metadata = budget.reserve(metadata_bytes as u64)?;
+        let metadata = budget.reserve(crate::memory::MemoryClass::Heap, metadata_bytes as u64)?;
         Ok(Self(Arc::new(PoolInner {
             metadata: Arc::new(Metadata {
                 _ticket: Mutex::new(metadata),
@@ -224,12 +224,15 @@ impl SharedNv12 {
         };
         unsafe { std::slice::from_raw_parts((self.0.pointer as *const u8).add(offset), len) }
     }
+    #[cfg(feature = "graphics")]
     pub(crate) fn id(&self) -> usize {
         Arc::as_ptr(&self.0) as usize
     }
+    #[cfg(feature = "graphics")]
     pub(crate) fn pointer(&self) -> usize {
         self.0.pointer
     }
+    #[cfg(feature = "graphics")]
     pub(crate) fn capacity(&self) -> usize {
         self.0.layout.memory().expect("validated layout").bytes() as usize
     }

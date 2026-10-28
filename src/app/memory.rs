@@ -11,14 +11,44 @@ use std::fmt;
 use std::format;
 use std::prelude::v1::*;
 
-/// An opaque owned accounting lease, released through its ordinary destructor.
-pub trait MemoryReservation: Send {}
-impl<T: Send> MemoryReservation for T {}
+pub use crate::memory::{MemoryBudget, MemoryReservation};
 
-/// Supplies reservations from the caller's existing physical memory ledger.
-pub trait MemoryBudget: Send + Sync {
-    /// Reserve actual rounded bytes before native allocation begins.
-    fn reserve(&self, bytes: u64) -> Result<Box<dyn MemoryReservation>, String>;
+/// Kernel-reported currently free capacities by allocation class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FreeMemory {
+    /// Ordinary user MAIN available for new kernel blocks.
+    pub main_bytes: u64,
+    /// CDRAM available for new kernel blocks.
+    pub cdram_bytes: u64,
+    /// Physically contiguous MAIN available for new kernel blocks.
+    pub contiguous_bytes: u64,
+}
+
+/// Query kernel free capacities after already allocated blocks have been deducted.
+/// The reported classes need not be disjoint and must not be added together.
+#[cfg(target_os = "vita")]
+pub fn free_memory() -> Result<FreeMemory, super::Error> {
+    let mut info = super::sdk::SceKernelFreeMemorySizeInfo {
+        size: std::mem::size_of::<super::sdk::SceKernelFreeMemorySizeInfo>() as i32,
+        size_user: 0,
+        size_cdram: 0,
+        size_phycont: 0,
+    };
+    // SAFETY: the complete initialized output record lives through this call.
+    super::Error::check("sceKernelGetFreeMemorySize", unsafe {
+        super::sdk::sceKernelGetFreeMemorySize(&mut info)
+    })?;
+    let nonnegative = |value: i32| {
+        u64::try_from(value).map_err(|_| super::Error {
+            operation: "invalid kernel free memory size",
+            code: -1,
+        })
+    };
+    Ok(FreeMemory {
+        main_bytes: nonnegative(info.size_user)?,
+        cdram_bytes: nonnegative(info.size_cdram)?,
+        contiguous_bytes: nonnegative(info.size_phycont)?,
+    })
 }
 
 /// Native storage class required by the allocating subsystem.
@@ -128,7 +158,11 @@ impl MemoryBlock {
     pub fn allocate(layout: MemoryLayout, budget: &dyn MemoryBudget) -> Result<Self, String> {
         use super::sdk;
         use std::{ffi::c_void, ptr};
-        let reservation = budget.reserve(layout.bytes())?;
+        let class = match layout.kind {
+            MemoryKind::Heap => crate::memory::MemoryClass::Heap,
+            MemoryKind::PhysicalUncached => crate::memory::MemoryClass::ContiguousKernel,
+        };
+        let reservation = budget.reserve(class, layout.bytes())?;
         let (base, block) = match layout.kind {
             MemoryKind::Heap => {
                 unsafe extern "C" {

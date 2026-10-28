@@ -11,7 +11,7 @@ struct SampledTexture {
 pub(super) struct Bindings {
     viewport: Option<[u32; 2]>,
     clip: Option<[u32; 4]>,
-    vertex: Option<usize>,
+    vertices: [Option<usize>; 2],
     textures: [Option<SampledTexture>; 16],
 }
 
@@ -28,8 +28,8 @@ impl Bindings {
         replace(&mut self.clip, rect)
     }
 
-    pub fn vertex(&mut self, address: usize) -> bool {
-        replace(&mut self.vertex, address)
+    pub fn vertex(&mut self, stream: usize, address: usize) -> bool {
+        replace(&mut self.vertices[stream], address)
     }
 
     pub fn texture(&mut self, unit: usize, descriptor: [u32; 4], filter: TextureFilter) -> bool {
@@ -62,14 +62,17 @@ mod tests {
             for _ in 0..64 {
                 calls[0] += usize::from(state.viewport([960, 544]));
                 calls[1] += usize::from(state.clip([0, 0, 960, 544]));
-                calls[2] += usize::from(state.vertex(0x1000));
+                calls[2] += usize::from(state.vertex(0, 0x1000));
                 calls[3] += usize::from(state.texture(0, [1, 2, 3, 4], TextureFilter::Linear));
             }
         }
         assert_eq!(calls, [1, 32, 1, 1]);
         assert!(state.viewport([480, 272]));
         assert!(state.clip([10, 20, 100, 200]));
-        assert!(state.vertex(0x2000));
+        assert!(state.vertex(0, 0x2000));
+        assert!(state.vertex(1, 0x2000));
+        assert!(!state.vertex(1, 0x2000));
+        assert!(state.vertex(1, 0x2030));
     }
 
     #[test]

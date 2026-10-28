@@ -5,6 +5,9 @@
 //! video expose owned buffers and explicit start, pause and shutdown operations.
 #![deny(unsafe_op_in_unsafe_fn)]
 
+/// Optional process-wide C/newlib/Rust heap and physical MAIN commitment.
+#[cfg(feature = "process-allocator")]
+pub mod allocator;
 /// Application identity, input, power events and native host services.
 #[cfg(all(feature = "app", target_os = "vita"))]
 pub mod app;
@@ -16,6 +19,8 @@ pub mod audio;
 pub mod graphics;
 #[cfg(all(feature = "graphics", target_os = "vita"))]
 mod graphics_active;
+/// Native allocation budget and owned reservation contracts.
+pub mod memory;
 /// AvPlayer hardware decoding from an owned seekable stream.
 #[cfg(all(feature = "video", target_os = "vita"))]
 pub mod video;

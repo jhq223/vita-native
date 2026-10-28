@@ -21,6 +21,8 @@ mod layout;
 #[cfg(any(target_os = "vita", test))]
 mod leases;
 #[cfg(any(target_os = "vita", test))]
+mod pressure;
+#[cfg(any(target_os = "vita", test))]
 mod render_targets;
 #[cfg(any(target_os = "vita", test))]
 mod retained;
@@ -31,6 +33,8 @@ mod timing;
 mod types;
 #[cfg(any(target_os = "vita", test))]
 mod uniform_layout;
+#[cfg(any(target_os = "vita", test))]
+mod vertex_layout;
 pub use layout::{
     MipLayout, TargetFootprint, TargetLayout, TextureLayout, mip_layout, mip_texture_layout,
     target_layout, texture_layout,
@@ -49,7 +53,7 @@ mod resources;
 #[cfg(all(target_os = "vita", feature = "video"))]
 mod video;
 #[cfg(target_os = "vita")]
-pub use commands::Draw;
+pub use commands::{Draw, DrawInstances};
 #[cfg(target_os = "vita")]
 pub use device::{Context, Fence};
 #[cfg(target_os = "vita")]

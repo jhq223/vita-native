@@ -1,0 +1,140 @@
+//! Same-domain reclamation at the kernel allocation boundary.
+use super::{
+    Error,
+    fault::{Fault, sdk},
+    types::Result,
+};
+use std::{
+    cell::RefCell,
+    prelude::v1::*,
+    rc::{Rc, Weak},
+    sync::Arc,
+};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Domain {
+    Main,
+    Cdram,
+}
+
+pub(super) trait IdlePool {
+    /// Release exclusively cached owners and return their physical capacity.
+    fn release_idle(&self) -> u64;
+}
+
+struct RegisteredPool {
+    domain: Domain,
+    pool: Weak<dyn IdlePool>,
+}
+#[derive(Clone, Default)]
+pub(super) struct Pressure {
+    pools: Rc<RefCell<Vec<RegisteredPool>>>,
+    main_budget: Option<Arc<dyn crate::memory::MemoryBudget>>,
+}
+
+impl Pressure {
+    pub fn new(main_budget: Option<Arc<dyn crate::memory::MemoryBudget>>) -> Self {
+        Self {
+            main_budget,
+            ..Self::default()
+        }
+    }
+    pub fn register<T: IdlePool + 'static>(&self, domain: Domain, pool: &Rc<T>) {
+        let pool: Rc<dyn IdlePool> = pool.clone();
+        self.pools.borrow_mut().push(RegisteredPool {
+            domain,
+            pool: Rc::downgrade(&pool),
+        });
+    }
+
+    fn reclaim(&self, domain: Domain, fault: &Fault) -> Result<u64> {
+        let mut released = 0;
+        for owner in self.pools.borrow().iter() {
+            if owner.domain == domain
+                && let Some(pool) = owner.pool.upgrade()
+            {
+                released += pool.release_idle();
+                fault.check()?;
+            }
+        }
+        Ok(released)
+    }
+    pub fn reserve(
+        &self,
+        domain: Domain,
+        bytes: u64,
+        fault: &Fault,
+    ) -> Result<Option<Box<dyn crate::memory::MemoryReservation>>> {
+        if domain != Domain::Main {
+            return Ok(None);
+        }
+        let Some(budget) = &self.main_budget else {
+            return Ok(None);
+        };
+        match budget.reserve(crate::memory::MemoryClass::MainKernel, bytes) {
+            Ok(ticket) => Ok(Some(ticket)),
+            Err(first @ crate::memory::MemoryBudgetError::Capacity(_)) => {
+                if self.reclaim(domain, fault)? == 0 {
+                    return Err(Error::Admission(first));
+                }
+                budget
+                    .reserve(crate::memory::MemoryClass::MainKernel, bytes)
+                    .map(Some)
+                    .map_err(Error::Admission)
+            }
+            Err(other) => Err(Error::Admission(other)),
+        }
+    }
+
+    #[cfg(target_os = "vita")]
+    pub fn commit_main(
+        &self,
+        domain: Domain,
+        bytes: usize,
+        fault: &Fault,
+    ) -> Result<crate::memory::MainCommit> {
+        if domain == Domain::Cdram {
+            return Ok(Default::default());
+        }
+        if let Some(ticket) = crate::memory::MainCommit::reserve(bytes) {
+            return Ok(ticket);
+        }
+        if self.reclaim(domain, fault)? > 0 {
+            if let Some(ticket) = crate::memory::MainCommit::reserve(bytes) {
+                return Ok(ticket);
+            }
+        }
+        Err(Error::Admission(
+            crate::memory::MemoryBudgetError::Capacity("process MAIN commitment limit".into()),
+        ))
+    }
+
+    pub fn allocate(
+        &self,
+        domain: Domain,
+        fault: &Fault,
+        mut allocate: impl FnMut() -> i32,
+    ) -> Result<i32> {
+        let first = allocate();
+        if first >= 0 {
+            return Ok(first);
+        }
+        // Sony kernel/error.h: exhausted physical pages, contiguous page units,
+        // and the CDRAM-specific physical-page error. Other SDK failures retain
+        // their original result without touching caches.
+        let exhausted = match first as u32 {
+            0x80024302 | 0x80024303 => true,
+            0x80024309 => domain == Domain::Cdram,
+            _ => false,
+        };
+        if exhausted && self.reclaim(domain, fault)? > 0 {
+            let next = allocate();
+            sdk("sceKernelAllocMemBlock", next)?;
+            return Ok(next);
+        }
+        Err(Error::Sdk("sceKernelAllocMemBlock", first))
+    }
+}
+
+#[cfg(test)]
+mod tests;
