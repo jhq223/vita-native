@@ -469,6 +469,8 @@ impl Context {
                     inner.fragment_id,
                     if output == FragmentOutput::Declared {
                         SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED
+                    } else if output == FragmentOutput::Srgb {
+                        SCE_GXM_OUTPUT_REGISTER_FORMAT_HALF4
                     } else {
                         SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4
                     },

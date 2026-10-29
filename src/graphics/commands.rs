@@ -44,26 +44,35 @@ pub struct Draw<'a> {
 }
 impl Context {
     pub(super) fn init_clear(&self, clear: ClearProgram<'_>) -> Result<()> {
-        let program = self.create_program(ProgramDescriptor {
-            output: FragmentOutput::Patched,
-            vertex: clear.vertex,
-            fragment: clear.fragment,
-            bindings: &[AttributeBinding {
-                location: 0,
-                name: clear.position_attribute,
-            }],
-            stride: 2,
-            attributes: &[VertexAttribute {
-                location: 0,
-                components: 2,
-                offset: 0,
-            }],
-            instance: None,
-            clip_uniform: Some(clear.clip_uniform),
-        })?;
-        let color = program
-            .uniform(clear.color_uniform)
-            .ok_or(Error::Invalid("clear color uniform"))?;
+        let create = |output| {
+            self.create_program(ProgramDescriptor {
+                output,
+                vertex: clear.vertex,
+                fragment: clear.fragment,
+                bindings: &[AttributeBinding {
+                    location: 0,
+                    name: clear.position_attribute,
+                }],
+                stride: 2,
+                attributes: &[VertexAttribute {
+                    location: 0,
+                    components: 2,
+                    offset: 0,
+                }],
+                instance: None,
+                clip_uniform: Some(clear.clip_uniform),
+            })
+        };
+        let programs = [
+            create(FragmentOutput::Patched)?,
+            create(FragmentOutput::Srgb)?,
+        ];
+        let color = |program: &Program| {
+            program
+                .uniform(clear.color_uniform)
+                .ok_or(Error::Invalid("clear color uniform"))
+        };
+        let colors = [color(&programs[0])?, color(&programs[1])?];
         let vertices = self.vertex_buffer(
             &[-1., -1., 3., -1., -1., 3.],
             2,
@@ -74,9 +83,9 @@ impl Context {
             }],
         )?;
         *self.0.clear.borrow_mut() = Some(Clear {
-            program,
+            programs,
             vertices,
-            color,
+            colors,
         });
         Ok(())
     }
@@ -163,6 +172,8 @@ impl Context {
             Target::Screen => self.output_size(),
             Target::Framebuffer(f) => f.size(),
         };
+        let encoding = self.target(target)?.encoding();
+        let index = usize::from(encoding == SurfaceEncoding::Srgb);
         let clear = self.0.clear.borrow();
         let clear = clear
             .as_ref()
@@ -170,13 +181,13 @@ impl Context {
         self.draw(Draw {
             target,
             size,
-            program: &clear.program,
+            program: &clear.programs[index],
             vertices: &clear.vertices,
             instances: None,
             indices: None,
             range: 0..3,
             textures: &[],
-            uniforms: &[UniformValue::Vec4(&clear.color, color)],
+            uniforms: &[UniformValue::Vec4(&clear.colors[index], color)],
             blend: Blend::Replace,
             scissor: None,
         })
@@ -226,6 +237,13 @@ impl Context {
             return Err(Error::Invalid("draw layout or range"));
         }
         let target = self.target(d.target)?;
+        if (target.encoding() == SurfaceEncoding::Srgb)
+            != (d.program.0.output == FragmentOutput::Srgb)
+        {
+            return Err(Error::Invalid(
+                "fragment output and surface encoding mismatch",
+            ));
+        }
         if (0..2).any(|i| d.size[i] > target.size()[i]) {
             return Err(Error::Invalid("logical viewport exceeds target"));
         }

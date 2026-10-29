@@ -102,11 +102,23 @@ pub enum TextureMemory {
     /// Uncached main memory for source assets, sharing bandwidth with the CPU.
     Main,
 }
+/// Encoding applied when a color surface is stored to memory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SurfaceEncoding {
+    /// Store RGBA8 values directly, using packed unsigned-byte output registers.
+    #[default]
+    Linear,
+    /// Encode linear RGB to sRGB in the pixel backend; alpha remains linear.
+    /// Draws use `FragmentOutput::Srgb` and 64-bit half4 output registers.
+    Srgb,
+}
 /// Fixed GPU infrastructure and soft idle-cache retention targets.
 /// Active arenas share physical MAIN/CDRAM admission. Idle cache targets
 /// control retained blocks; pressure releases idle owners first.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
+    /// Scanout storage encoding. Default preserves application-encoded RGBA8.
+    pub display_encoding: SurfaceEncoding,
     /// Idle MAIN texture blocks retained for reuse.
     pub main_texture_retained_bytes: u64,
     /// Idle CDRAM blocks retained for reuse.
@@ -139,6 +151,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            display_encoding: SurfaceEncoding::Linear,
             main_texture_retained_bytes: 8 * 1024 * 1024,
             pixel_retained_bytes: 8 * 1024 * 1024,
             buffer_retained_bytes: 1024 * 1024,
@@ -397,6 +410,9 @@ pub enum FragmentOutput {
     /// The SDK patches RGBA8 replacement and premultiplied source-over variants.
     #[default]
     Patched,
+    /// The SDK patches half4 replacement and premultiplied source-over variants.
+    /// Draw only to `SurfaceEncoding::Srgb` surfaces; supply linear colors.
+    Srgb,
     /// The GXP uses `__nativecolor` and declares its output register format.
     /// The shader owns blending; draws must use `Blend::Replace`.
     Declared,

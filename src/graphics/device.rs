@@ -327,9 +327,9 @@ pub(super) struct BoundProgram {
     pub variants: [usize; 2],
 }
 pub(super) struct Clear {
-    pub program: Program,
+    pub programs: [Program; 2],
     pub vertices: VertexBuffer,
-    pub color: Uniform,
+    pub colors: [Uniform; 2],
 }
 pub(super) struct Inner {
     pub timing: super::timing::Timings,
@@ -495,7 +495,11 @@ impl Context {
                 .0
                 .screens
                 .borrow_mut()
-                .push(context.create_framebuffer(&t, super::display_sync::SurfaceKind::Display)?);
+                .push(context.create_framebuffer(
+                    &t,
+                    super::display_sync::SurfaceKind::Display,
+                    config.display_encoding,
+                )?);
         }
         let screens = context.0.screens.borrow();
         let t = &screens[0].0.texture;
@@ -931,7 +935,7 @@ impl Context {
         let internal = 1
             + self.0.screens.borrow().len() * 2
             + self.0.targets.borrow().live_count()
-            + usize::from(self.0.clear.borrow().is_some()) * 2;
+            + usize::from(self.0.clear.borrow().is_some()) * 3;
         if Rc::strong_count(&self.0.core) != internal {
             return Err((self, Error::Invalid("GXM resources or fences still alive")));
         }

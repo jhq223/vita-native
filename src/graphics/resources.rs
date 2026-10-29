@@ -63,6 +63,7 @@ pub(super) struct FramebufferInner {
     /// Shared firmware scheduling backing, independent of this color surface.
     pub target: Rc<RenderTarget>,
     pub surface: SceGxmColorSurface,
+    pub encoding: SurfaceEncoding,
     pub owner: Rc<Core>,
 }
 /// Render-target scheduling backing plus a sampled view of its color allocation.
@@ -72,6 +73,10 @@ impl Framebuffer {
     /// Physical texture/target extent in pixels.
     pub fn size(&self) -> [u32; 2] {
         self.0.texture.size()
+    }
+    /// Encoding of bytes stored by this surface. Sampling does not decode sRGB.
+    pub fn encoding(&self) -> SurfaceEncoding {
+        self.0.encoding
     }
     /// Sampled view sharing this render target's color allocation.
     pub fn texture(&self) -> &Texture {
@@ -573,10 +578,30 @@ impl Context {
     /// notifications retain storage until completion. Display sync objects belong
     /// only to the three context-owned scanout buffers.
     pub fn framebuffer(&self, t: &Texture) -> Result<Framebuffer> {
-        self.create_framebuffer(t, SurfaceKind::Offscreen)
+        self.framebuffer_encoded(t, SurfaceEncoding::Linear)
     }
-    pub(super) fn create_framebuffer(&self, t: &Texture, kind: SurfaceKind) -> Result<Framebuffer> {
+    /// Bind RGBA8/BGRA8 storage with explicit writeback encoding. sRGB surfaces
+    /// require `FragmentOutput::Srgb`; readback and texture views expose encoded
+    /// bytes. Coverage8 supports only linear storage. Ownership matches `framebuffer`.
+    pub fn framebuffer_encoded(
+        &self,
+        t: &Texture,
+        encoding: SurfaceEncoding,
+    ) -> Result<Framebuffer> {
+        self.create_framebuffer(t, SurfaceKind::Offscreen, encoding)
+    }
+    pub(super) fn create_framebuffer(
+        &self,
+        t: &Texture,
+        kind: SurfaceKind,
+        encoding: SurfaceEncoding,
+    ) -> Result<Framebuffer> {
         self.same(&t.0.owner)?;
+        if encoding == SurfaceEncoding::Srgb
+            && !matches!(t.format(), TextureFormat::Rgba8 | TextureFormat::Bgra8)
+        {
+            return Err(Error::Unsupported("sRGB color surface format"));
+        }
         let format = match t.format() {
             TextureFormat::Rgba8 => SCE_GXM_COLOR_FORMAT_A8B8G8R8,
             TextureFormat::Bgra8 => SCE_GXM_COLOR_FORMAT_A8R8G8B8,
@@ -603,18 +628,30 @@ impl Context {
                 format,
                 SCE_GXM_COLOR_SURFACE_LINEAR,
                 SCE_GXM_COLOR_SURFACE_SCALE_NONE,
-                SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT,
+                if encoding == SurfaceEncoding::Srgb {
+                    SCE_GXM_OUTPUT_REGISTER_SIZE_64BIT
+                } else {
+                    SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT
+                },
                 t.size()[0],
                 t.size()[1],
                 (t.0.layout.row_stride_bytes / t.format().pixel_bytes()) as u32,
                 t.0.allocation.ptr().cast(),
             )
         })?;
+        if encoding == SurfaceEncoding::Srgb {
+            // SAFETY: the initialized linear RGBA8/BGRA8 surface uses half4
+            // registers. RGB conversion occurs only when its tiles are stored.
+            sdk("sceGxmColorSurfaceSetGammaMode", unsafe {
+                sceGxmColorSurfaceSetGammaMode(&mut surface, SCE_GXM_COLOR_SURFACE_GAMMA_BGR)
+            })?;
+        }
         let sync = DisplaySync::new(kind, &self.0.core.fault)?;
         Ok(Framebuffer(Rc::new(FramebufferInner {
             texture: t.clone(),
             target,
             surface,
+            encoding,
             sync,
             owner: self.0.core.clone(),
         })))

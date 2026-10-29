@@ -88,6 +88,10 @@ to support exact pixel scissors. `ClearProgram` describes the application's clea
 programs and binding names. Programs are prepared once and reused by draws.
 `FragmentOutput::Declared` accepts `__nativecolor` programs that own blending and
 the output register format; their draws use replacement mode.
+`Config::display_encoding` and `Context::framebuffer_encoded` can select sRGB
+writeback. These surfaces accept linear colors through `FragmentOutput::Srgb`
+half4 programs; the pixel backend encodes RGB on store and preserves alpha.
+Readback and sampled views expose the stored bytes; default surfaces remain linear.
 `ProgramDescriptor::instance` describes an optional second f32 stream indexed by
 instance number. `Draw::instances` supplies its immutable buffer and range; base
 indices wrap once per instance in original order. Each draw accepts at most
