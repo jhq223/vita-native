@@ -24,6 +24,21 @@ pub enum Error {
         /// Configured maximum capacity for this domain.
         limit: u64,
     },
+    /// Kernel pages could not satisfy a mapped-block request after idle reclamation.
+    Allocation {
+        /// Physical domain requested by the block.
+        domain: &'static str,
+        /// Rounded block size requested from the kernel.
+        requested: u64,
+        /// Kernel free bytes after failure, when its query succeeds. Placement
+        /// constraints depend on the domain and may still reject the request.
+        available: Option<u64>,
+        /// Domain commitments excluding this failed request; includes other
+        /// pending reservations and retained blocks.
+        committed: u64,
+        /// Original signed sceKernelAllocMemBlock result.
+        code: i32,
+    },
     /// Caller-supplied MAIN physical budget rejected an allocation.
     Admission(crate::memory::MemoryBudgetError),
     /// Native construction failed before submission.
@@ -87,25 +102,30 @@ pub enum TextureMemory {
     /// Uncached main memory for source assets, sharing bandwidth with the CPU.
     Main,
 }
-/// Fixed infrastructure budgets. Pixel/buffer arenas grow by suballocated blocks.
+/// Encoding applied when a color surface is stored to memory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SurfaceEncoding {
+    /// Store RGBA8 values directly, using packed unsigned-byte output registers.
+    #[default]
+    Linear,
+    /// Encode linear RGB to sRGB in the pixel backend; alpha remains linear.
+    /// Draws use `FragmentOutput::Srgb` and 64-bit half4 output registers.
+    Srgb,
+}
+/// Fixed GPU infrastructure and soft idle-cache retention targets.
+/// Active arenas share physical MAIN/CDRAM admission. Idle cache targets
+/// control retained blocks; pressure releases idle owners first.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
-    /// CDRAM texture/target capacity, excluding scanout and the parameter buffer.
-    /// The default 88 MiB leaves 8 MiB for scanout and 16 MiB for parameters.
-    pub pixel_arena_bytes: u64,
-    /// Uncached MAIN texture capacity, independent of geometry and staging.
-    pub main_texture_arena_bytes: u64,
-    /// Idle MAIN texture blocks retained within main_texture_arena_bytes.
+    /// Scanout storage encoding. Default preserves application-encoded RGBA8.
+    pub display_encoding: SurfaceEncoding,
+    /// Idle MAIN texture blocks retained for reuse.
     pub main_texture_retained_bytes: u64,
-    /// Reserved uncached LPDDR cap for geometry and upload staging; default 16 MiB.
-    pub buffer_arena_bytes: u64,
-    /// Strongly retained pixel block capacity, included in pixel_arena_bytes.
+    /// Idle CDRAM blocks retained for reuse.
     pub pixel_retained_bytes: u64,
-    /// Strongly retained buffer block capacity, included in buffer_arena_bytes.
+    /// Idle MAIN geometry and staging blocks retained for reuse.
     pub buffer_retained_bytes: u64,
-    /// Total firmware scheduling block capacity, including active and retained targets.
-    pub render_target_bytes: u64,
-    /// Strongly retained scheduling capacity within render_target_bytes.
+    /// Idle firmware scheduling blocks retained for reuse.
     pub render_target_retained_bytes: u64,
     /// Maximum simultaneously owned transfer staging; admission waits real completion at this cap.
     pub upload_staging_bytes: u64,
@@ -131,13 +151,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            pixel_arena_bytes: 88 * 1024 * 1024,
-            main_texture_arena_bytes: 64 * 1024 * 1024,
+            display_encoding: SurfaceEncoding::Linear,
             main_texture_retained_bytes: 8 * 1024 * 1024,
-            buffer_arena_bytes: 16 * 1024 * 1024,
             pixel_retained_bytes: 8 * 1024 * 1024,
             buffer_retained_bytes: 1024 * 1024,
-            render_target_bytes: 16 * 1024 * 1024,
             render_target_retained_bytes: 4 * 1024 * 1024,
             upload_staging_bytes: 4 * 1024 * 1024,
             parameter_bytes: 16 * 1024 * 1024,
@@ -192,6 +209,25 @@ pub struct SubmissionTiming {
     pub upload_capacity_wait: NativeCallTiming,
     /// Explicit notification wait for resource readers before CPU replacement/capture.
     pub resource_replacement_wait: NativeCallTiming,
+    /// Calling-thread execution and query overhead around EndScene; not GPU time.
+    pub scene_end_thread: super::ThreadRunTiming,
+    /// Shared scheduling-target and bounded slow-call observations.
+    pub scene_queue: super::SceneQueueTiming,
+    /// Token publication and first normal-poll observation, kept distinct.
+    pub notifications: super::NotificationTiming,
+    /// Display-thread flip and vsync waits, independent of EndScene.
+    pub display: super::DisplayTiming,
+}
+/// Physical admission shared by all mapped arenas. MAIN includes CPU arenas
+/// when `process-allocator` is enabled. Counters include pending reservations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryState {
+    /// Ordinary MAIN physical commitment.
+    pub main: crate::memory::PhysicalUsage,
+    /// CDRAM blocks after fixed SDK infrastructure has been deducted.
+    pub cdram: crate::memory::PhysicalUsage,
+    /// Scanout blocks, included in CDRAM commitment.
+    pub scanout_bytes: u64,
 }
 /// Independent native memory domains. Renderer tickets describe their own payloads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -374,6 +410,9 @@ pub enum FragmentOutput {
     /// The SDK patches RGBA8 replacement and premultiplied source-over variants.
     #[default]
     Patched,
+    /// The SDK patches half4 replacement and premultiplied source-over variants.
+    /// Draw only to `SurfaceEncoding::Srgb` surfaces; supply linear colors.
+    Srgb,
     /// The GXP uses `__nativecolor` and declares its output register format.
     /// The shader owns blending; draws must use `Blend::Replace`.
     Declared,

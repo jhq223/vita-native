@@ -1,6 +1,62 @@
 //! Caller-supplied admission for native allocation ownership.
 use std::prelude::v1::*;
 
+#[cfg(target_os = "vita")]
+mod kernel;
+#[cfg(target_os = "vita")]
+pub use kernel::free_memory;
+
+/// Kernel-reported currently free capacities by allocation class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FreeMemory {
+    /// Ordinary user MAIN available for new kernel blocks.
+    pub main_bytes: u64,
+    /// CDRAM available for new kernel blocks.
+    pub cdram_bytes: u64,
+    /// Physically contiguous MAIN available for new kernel blocks.
+    pub contiguous_bytes: u64,
+}
+
+/// A kernel memory query failure with its original SDK result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoryError {
+    /// Native operation that failed.
+    pub operation: &'static str,
+    /// Original signed native result.
+    pub code: i32,
+}
+impl MemoryError {
+    #[cfg(target_os = "vita")]
+    fn check(operation: &'static str, code: i32) -> Result<(), Self> {
+        if code < 0 {
+            Err(Self { operation, code })
+        } else {
+            Ok(())
+        }
+    }
+}
+impl std::fmt::Display for MemoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {:#010x}", self.operation, self.code)
+    }
+}
+impl std::error::Error for MemoryError {}
+
+/// Physical page commitment, separate from suballocated payload accounting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PhysicalUsage {
+    /// Managed capacity observed before concurrent consumers start.
+    pub capacity_bytes: u64,
+    /// Rounded blocks and reservations awaiting kernel allocation or release.
+    pub committed_bytes: u64,
+}
+impl PhysicalUsage {
+    /// Space currently available for a new physical reservation.
+    pub fn available_bytes(self) -> u64 {
+        self.capacity_bytes.saturating_sub(self.committed_bytes)
+    }
+}
+
 /// An opaque owned accounting lease, released through its ordinary destructor.
 pub trait MemoryReservation: Send {}
 impl<T: Send> MemoryReservation for T {}

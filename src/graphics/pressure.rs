@@ -1,9 +1,7 @@
 //! Same-domain reclamation at the kernel allocation boundary.
-use super::{
-    Error,
-    fault::{Fault, sdk},
-    types::Result,
-};
+mod physical;
+use super::{Error, fault::Fault, types::Result};
+pub(super) use physical::Commit;
 use std::{
     cell::RefCell,
     prelude::v1::*,
@@ -29,6 +27,8 @@ struct RegisteredPool {
 #[derive(Clone, Default)]
 pub(super) struct Pressure {
     pools: Rc<RefCell<Vec<RegisteredPool>>>,
+    main: Rc<physical::Pool>,
+    cdram: Rc<physical::Pool>,
     main_budget: Option<Arc<dyn crate::memory::MemoryBudget>>,
 }
 
@@ -38,6 +38,89 @@ impl Pressure {
             main_budget,
             ..Self::default()
         }
+    }
+    #[cfg(target_os = "vita")]
+    pub fn initialize_main(&self) -> Result<()> {
+        #[cfg(feature = "process-allocator")]
+        let capacity = crate::allocator::main_usage().capacity_bytes;
+        #[cfg(not(feature = "process-allocator"))]
+        let capacity = crate::memory::free_memory()
+            .map_err(|e| Error::Sdk(e.operation, e.code))?
+            .main_bytes;
+        self.main.initialize(capacity);
+        Ok(())
+    }
+    #[cfg(target_os = "vita")]
+    pub fn initialize_cdram(&self) -> Result<()> {
+        // libgxm has already allocated its parameter buffer. No managed CDRAM
+        // blocks exist yet, so the free count is the entire shared capacity.
+        let free = crate::memory::free_memory().map_err(|e| Error::Sdk(e.operation, e.code))?;
+        self.cdram.initialize(free.cdram_bytes);
+        Ok(())
+    }
+    pub fn usage(&self, domain: Domain) -> crate::memory::PhysicalUsage {
+        match domain {
+            Domain::Main => {
+                #[cfg(all(target_os = "vita", feature = "process-allocator"))]
+                {
+                    crate::allocator::main_usage()
+                }
+                #[cfg(not(all(target_os = "vita", feature = "process-allocator")))]
+                {
+                    self.main.usage()
+                }
+            }
+            Domain::Cdram => self.cdram.usage(),
+        }
+    }
+    pub fn commit(&self, domain: Domain, bytes: u64, fault: &Fault) -> Result<Commit> {
+        let pool = match domain {
+            Domain::Main => &self.main,
+            Domain::Cdram => &self.cdram,
+        };
+        if let Some(ticket) = pool.reserve(bytes) {
+            return Ok(ticket);
+        }
+        if self.reclaim(domain, fault)? > 0
+            && let Some(ticket) = pool.reserve(bytes)
+        {
+            return Ok(ticket);
+        }
+        Err(Error::Budget {
+            domain: match domain {
+                Domain::Main => "physical MAIN",
+                Domain::Cdram => "physical CDRAM",
+            },
+            requested: bytes,
+            limit: pool.usage().available_bytes(),
+        })
+    }
+    #[cfg(target_os = "vita")]
+    pub fn block_size(
+        &self,
+        domain: Domain,
+        bytes: usize,
+        quantum: usize,
+        page: usize,
+        fault: &Fault,
+    ) -> Result<usize> {
+        let preferred = bytes
+            .max(quantum)
+            .checked_next_multiple_of(page)
+            .ok_or(Error::Invalid("native block size"))?;
+        if preferred as u64 > self.usage(domain).available_bytes() {
+            self.reclaim(domain, fault)?;
+        }
+        // Retain the minimum rounded request when capacity is exhausted: the
+        // actual reservation then reports the original physical-domain failure.
+        Ok(
+            super::suballoc::block_size(bytes, quantum, page, self.usage(domain).available_bytes())
+                .unwrap_or(
+                    bytes
+                        .checked_next_multiple_of(page)
+                        .ok_or(Error::Invalid("native block size"))?,
+                ),
+        )
     }
     pub fn register<T: IdlePool + 'static>(&self, domain: Domain, pool: &Rc<T>) {
         let pool: Rc<dyn IdlePool> = pool.clone();
@@ -104,35 +187,52 @@ impl Pressure {
                 return Ok(ticket);
             }
         }
-        Err(Error::Admission(
-            crate::memory::MemoryBudgetError::Capacity("process MAIN commitment limit".into()),
-        ))
+        Err(Error::Budget {
+            domain: "physical MAIN",
+            requested: bytes as u64,
+            limit: self.usage(Domain::Main).available_bytes(),
+        })
     }
 
     pub fn allocate(
         &self,
         domain: Domain,
+        bytes: u64,
         fault: &Fault,
         mut allocate: impl FnMut() -> i32,
     ) -> Result<i32> {
-        let first = allocate();
-        if first >= 0 {
-            return Ok(first);
-        }
-        // Sony kernel/error.h: exhausted physical pages, contiguous page units,
-        // and the CDRAM-specific physical-page error. Other SDK failures retain
-        // their original result without touching caches.
-        let exhausted = match first as u32 {
+        let mut code = allocate();
+        let exhausted = |code: i32| match code as u32 {
             0x80024302 | 0x80024303 => true,
             0x80024309 => domain == Domain::Cdram,
             _ => false,
         };
-        if exhausted && self.reclaim(domain, fault)? > 0 {
-            let next = allocate();
-            sdk("sceKernelAllocMemBlock", next)?;
-            return Ok(next);
+        if exhausted(code) && self.reclaim(domain, fault)? > 0 {
+            code = allocate();
         }
-        Err(Error::Sdk("sceKernelAllocMemBlock", first))
+        if code >= 0 {
+            return Ok(code);
+        }
+        if !exhausted(code) {
+            return Err(Error::Sdk("sceKernelAllocMemBlock", code));
+        }
+        #[cfg(target_os = "vita")]
+        let available = crate::memory::free_memory().ok().map(|free| match domain {
+            Domain::Main => free.main_bytes,
+            Domain::Cdram => free.cdram_bytes,
+        });
+        #[cfg(not(target_os = "vita"))]
+        let available = None;
+        Err(Error::Allocation {
+            domain: match domain {
+                Domain::Main => "physical MAIN",
+                Domain::Cdram => "physical CDRAM",
+            },
+            requested: bytes,
+            available,
+            committed: self.usage(domain).committed_bytes.saturating_sub(bytes),
+            code,
+        })
     }
 }
 

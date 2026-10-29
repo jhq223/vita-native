@@ -26,6 +26,7 @@ struct DisplayState {
     flips: AtomicU32,
     error: AtomicI32,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    timing: super::timing::DisplayTimings,
 }
 #[repr(C)]
 struct DisplayData {
@@ -38,6 +39,7 @@ struct DisplayData {
 unsafe extern "C" fn display_callback(data: *const core::ffi::c_void) {
     let d = unsafe { &*data.cast::<DisplayData>() };
     let state = unsafe { &*d.state };
+    let callback_started = state.timing.enter();
     let fb = SceDisplayFrameBuf {
         size: core::mem::size_of::<SceDisplayFrameBuf>() as u32,
         base: d.base.cast(),
@@ -46,18 +48,24 @@ unsafe extern "C" fn display_callback(data: *const core::ffi::c_void) {
         width: 960,
         height: 544,
     };
-    let result = unsafe {
-        sceDisplaySetFrameBuf(
-            &fb,
-            if d.vsync != 0 {
-                SCE_DISPLAY_SETBUF_NEXTFRAME
-            } else {
-                SCE_DISPLAY_SETBUF_IMMEDIATE
-            },
-        )
-    };
+    let result = state
+        .timing
+        .measure(super::timing::DisplayCall::Set, || unsafe {
+            sceDisplaySetFrameBuf(
+                &fb,
+                if d.vsync != 0 {
+                    SCE_DISPLAY_SETBUF_NEXTFRAME
+                } else {
+                    SCE_DISPLAY_SETBUF_IMMEDIATE
+                },
+            )
+        });
     let result = if result >= 0 && d.vsync != 0 {
-        unsafe { sceDisplayWaitSetFrameBuf() }
+        state
+            .timing
+            .measure(super::timing::DisplayCall::Wait, || unsafe {
+                sceDisplayWaitSetFrameBuf()
+            })
     } else {
         result
     };
@@ -69,6 +77,7 @@ unsafe extern "C" fn display_callback(data: *const core::ffi::c_void) {
     } else {
         state.flips.fetch_add(1, Ordering::Relaxed);
     }
+    state.timing.complete(callback_started);
     state.completed.store(d.serial, Ordering::Release);
     if let Some(wake) = &state.wake {
         wake();
@@ -297,6 +306,8 @@ pub(super) struct Recording {
     pub slot: usize,
     pub notification: u32,
     pub size: [u32; 2],
+    #[cfg(feature = "profiling")]
+    pub work: super::SceneWork,
 }
 pub(super) struct State {
     pub recording: Option<Recording>,
@@ -316,9 +327,9 @@ pub(super) struct BoundProgram {
     pub variants: [usize; 2],
 }
 pub(super) struct Clear {
-    pub program: Program,
+    pub programs: [Program; 2],
     pub vertices: VertexBuffer,
-    pub color: Uniform,
+    pub colors: [Uniform; 2],
 }
 pub(super) struct Inner {
     pub timing: super::timing::Timings,
@@ -408,45 +419,27 @@ impl Context {
         }
         let fault = Fault::default();
         let pressure = super::pressure::Pressure::new(main_budget);
+        pressure.initialize_main()?;
         let native = Native::new(config, &fault, &pressure, wake)?;
+        pressure.initialize_cdram()?;
         let targets = Rc::new(RefCell::new(super::render_targets::Pool::new(
-            config
-                .render_target_retained_bytes
-                .min(config.render_target_bytes),
+            config.render_target_retained_bytes,
         )));
         pressure.register(super::pressure::Domain::Main, &targets);
         let core = Rc::new(Core {
             native,
-            pixels: Arena::new(
-                "native CDRAM pixels",
-                Kind::Cdram,
-                &fault,
-                &pressure,
-                config.pixel_arena_bytes,
-                config.pixel_retained_bytes,
-            ),
+            pixels: Arena::new(Kind::Cdram, &fault, &pressure, config.pixel_retained_bytes),
             main_textures: Arena::new(
-                "native MAIN textures",
                 Kind::Uncached,
                 &fault,
                 &pressure,
-                config.main_texture_arena_bytes,
                 config.main_texture_retained_bytes,
             ),
-            display_pixels: Arena::new(
-                "native scanout",
-                Kind::Cdram,
-                &fault,
-                &pressure,
-                8 * 1024 * 1024,
-                0,
-            ),
+            display_pixels: Arena::new(Kind::Cdram, &fault, &pressure, 0),
             buffers: Arena::new(
-                "native buffers",
                 Kind::Uncached,
                 &fault,
                 &pressure,
-                config.buffer_arena_bytes,
                 config.buffer_retained_bytes,
             ),
             fault,
@@ -502,7 +495,11 @@ impl Context {
                 .0
                 .screens
                 .borrow_mut()
-                .push(context.create_framebuffer(&t, super::display_sync::SurfaceKind::Display)?);
+                .push(context.create_framebuffer(
+                    &t,
+                    super::display_sync::SurfaceKind::Display,
+                    config.display_encoding,
+                )?);
         }
         let screens = context.0.screens.borrow();
         let t = &screens[0].0.texture;
@@ -704,18 +701,37 @@ impl Context {
         leases: Vec<Lease>,
         staging: usize,
     ) -> Rc<Completion> {
+        #[cfg(feature = "profiling")]
+        let target_id = leases
+            .iter()
+            .find_map(|lease| match lease {
+                Lease::Target(target) => Some(target.0.target.raw as usize as u64),
+                _ => None,
+            })
+            .unwrap_or(0);
         let token = Rc::new(Completion {
             address: n.address,
             value: n.value,
             done: Cell::new(false),
             leases: RefCell::new(leases),
             staging,
+            #[cfg(feature = "profiling")]
+            profile: self
+                .0
+                .timing
+                .published(target_id, n.value, super::timing::clock_us()),
         });
         s.flights.push_back(Flight {
             slot,
             token: token.clone(),
         });
         s.last = Some(token.clone());
+        #[cfg(feature = "profiling")]
+        self.0.timing.observe_pending(super::completion::pending(
+            &s.flights,
+            target_id,
+            super::timing::clock_us(),
+        ));
         token
     }
     pub(super) fn retain(recording: &mut Recording, lease: Lease) {
@@ -730,12 +746,26 @@ impl Context {
             address: unsafe { sceGxmGetNotificationRegion().add(r.slot) },
             value: r.notification,
         };
+        #[cfg(feature = "profiling")]
+        let target_id = r.target.0.target.raw as usize as u64;
+        #[cfg(feature = "profiling")]
+        let probe = self.0.timing.start_scene_end(
+            n.value,
+            target_id,
+            r.target.size().map(|n| n.max(128).next_power_of_two()),
+            r.work,
+            super::completion::pending(&s.flights, target_id, super::timing::clock_us()),
+        );
         let code = self
             .0
             .timing
             .measure(super::timing::Call::SceneEnd, || unsafe {
                 sceGxmEndScene(self.0.core.native.context, core::ptr::null(), &n)
             });
+        #[cfg(feature = "profiling")]
+        self.0.timing.finish_scene_end(probe, code, |now| {
+            super::completion::pending(&s.flights, target_id, now)
+        });
         if let Err(e) = self.command("sceGxmEndScene", code) {
             core::mem::forget(r);
             return Err(e);
@@ -755,6 +785,8 @@ impl Context {
                 done: Cell::new(true),
                 leases: RefCell::new(Vec::new()),
                 staging: 0,
+                #[cfg(feature = "profiling")]
+                profile: Default::default(),
             })
         });
         Ok(Fence {
@@ -828,14 +860,32 @@ impl Context {
         s.screen = (s.screen + 1) % screens.len();
         self.check("present completion")
     }
+    /// Read the shared physical admission counters in constant time.
+    /// Reuse this for planning; actual kernel allocation remains authoritative.
+    pub fn memory_state(&self) -> super::MemoryState {
+        let core = &self.0.core;
+        super::MemoryState {
+            main: core.pressure.usage(super::pressure::Domain::Main),
+            cdram: core.pressure.usage(super::pressure::Domain::Cdram),
+            scanout_bytes: core.display_pixels.reserved_bytes(),
+        }
+    }
     /// Snapshot native owners and command counters after the latest completion poll.
     /// This observes accounting without polling notifications or retiring owners.
     pub fn memory_usage(&self) -> Result<MemoryUsage> {
         self.check("memory accounting")?;
         let s = self.0.state.borrow();
         let n = &self.0.core.native;
+        let mut submission_timing = self.0.timing.snapshot();
+        submission_timing.display = n.display.timing.snapshot();
+        #[cfg(feature = "profiling")]
+        {
+            submission_timing.scene_queue.scenes_per_frame = self.0.core.config.scenes_per_frame;
+            submission_timing.notifications.pending =
+                super::completion::pending(&s.flights, 0, super::timing::clock_us());
+        }
         Ok(MemoryUsage {
-            submission_timing: self.0.timing.snapshot(),
+            submission_timing,
             pixels: self.0.core.pixels.usage(),
             main_textures: self.0.core.main_textures.usage(),
             buffers: self.0.core.buffers.usage(),
@@ -885,7 +935,7 @@ impl Context {
         let internal = 1
             + self.0.screens.borrow().len() * 2
             + self.0.targets.borrow().live_count()
-            + usize::from(self.0.clear.borrow().is_some()) * 2;
+            + usize::from(self.0.clear.borrow().is_some()) * 3;
         if Rc::strong_count(&self.0.core) != internal {
             return Err((self, Error::Invalid("GXM resources or fences still alive")));
         }

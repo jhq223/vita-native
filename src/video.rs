@@ -9,6 +9,8 @@ use std::{
     prelude::v1::*,
 };
 
+#[cfg(feature = "profiling")]
+mod diagnostics;
 mod info;
 mod input;
 mod metadata;

@@ -30,6 +30,8 @@ pub struct HeapStats {
 unsafe extern "C" {
     fn vita_native_process_heap_anchor();
     fn vn_heap_configure() -> i32;
+    fn vn_main_capacity() -> u32;
+    fn vn_main_committed() -> u32;
     fn vn_heap_stats(out: *mut HeapStats) -> i32;
     #[cfg(any(all(target_os = "vita", feature = "graphics"), test))]
     fn vn_main_reserve(bytes: u32) -> i32;
@@ -62,6 +64,19 @@ pub fn configure_main_budget() -> Result<(), HeapError> {
         Ok(())
     }
 }
+/// Read shared MAIN counters through allocation-free atomic loads.
+/// Capacity is fixed at the configured cold-start boundary; concurrent
+/// commitments may change immediately after this observation.
+pub fn main_usage() -> crate::memory::PhysicalUsage {
+    // SAFETY: these functions only read the allocator's 32-bit atomics.
+    unsafe {
+        crate::memory::PhysicalUsage {
+            capacity_bytes: vn_main_capacity().into(),
+            committed_bytes: vn_main_committed().into(),
+        }
+    }
+}
+
 /// Observe actual committed ownership without allocating diagnostic storage.
 pub fn stats() -> Result<HeapStats, HeapError> {
     let mut out = HeapStats::default();

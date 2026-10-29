@@ -11,6 +11,7 @@
 mod bindings;
 #[cfg(any(target_os = "vita", test))]
 mod completion;
+mod diagnostics;
 #[cfg(any(target_os = "vita", test))]
 mod display_sync;
 #[cfg(any(target_os = "vita", test))]
@@ -29,12 +30,15 @@ mod retained;
 #[cfg(any(target_os = "vita", test))]
 mod suballoc;
 #[cfg(any(target_os = "vita", test))]
+mod texture_copy;
+#[cfg(any(target_os = "vita", test))]
 mod timing;
 mod types;
 #[cfg(any(target_os = "vita", test))]
 mod uniform_layout;
 #[cfg(any(target_os = "vita", test))]
 mod vertex_layout;
+pub use diagnostics::*;
 pub use layout::{
     MipLayout, TargetFootprint, TargetLayout, TextureLayout, mip_layout, mip_texture_layout,
     target_layout, texture_layout,
