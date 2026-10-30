@@ -103,8 +103,10 @@ select RGBA8 or single-channel alpha coverage through `TargetFormat`.
 `Config::target_storage` selects linear storage (default) or 32×32 tiled RGBA8
 storage. Small surfaces, Coverage8 and scanout stay linear. Allocation, color
 surface, sampler and CPU row conversion use the reported actual layout. Tiled
-uploads wait for their own users; arbitrary PTLA rectangle copies use linear
-targets, so applications retain their drawing path for tiled targets.
+uploads wait for their own users. `Context::supports_texture_copy` admits linear
+rectangles and aligned tiled rectangles; applications use their drawing path for
+other layout/rectangle combinations. Tiled PTLA commands rebase complete tile-row
+strips with zero native origins and matching command strides.
 Render targets and scanout use CDRAM; applications choose sampled-image placement to balance capacity
 and bandwidth. `MemoryUsage` reports each physical arena separately. CDRAM admission includes scanout and all mapped pixel blocks; the SDK parameter
 buffer is deducted before this shared domain is initialized.
@@ -143,8 +145,8 @@ work keeps its resources until completion. When kernel allocation reports exhaus
 physical pages, the device releases idle caches in that physical domain and retries
 once if storage was released. Retained blocks remain charged to their physical domain.
 
-`Context::copy_texture` copies unscaled RGBA8 rectangles between independent
-strided render targets using PTLA. Fragment/transfer dependencies and the final
+`Context::copy_texture` copies compatible unscaled RGBA8 rectangles between independent
+render targets using PTLA. Fragment/transfer dependencies and the final
 notification retain both allocations. Applications keep drawing paths for other formats.
 
 ## Ownership and threads
