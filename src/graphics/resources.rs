@@ -178,24 +178,21 @@ impl Context {
         &self,
         size: [u32; 2],
         format: TextureFormat,
-        strided: bool,
+        target_storage: Option<TargetStorage>,
         display: bool,
         mip_count: u32,
         memory: super::TextureMemory,
     ) -> Result<Texture> {
         self.check("texture creation")?;
+        let strided = target_storage.is_some();
         let mut storage = TargetStorage::Linear;
-        let l = if strided {
+        let l = if let Some(requested) = target_storage {
             let target_format = match format {
                 TextureFormat::Rgba8 | TextureFormat::Bgra8 => TargetFormat::Rgba8,
                 TextureFormat::Coverage8 => TargetFormat::Coverage8,
                 _ => return Err(Error::Unsupported("strided target format")),
             };
-            let l = if display {
-                target_layout(size, target_format)?
-            } else {
-                self.target_layout(size, target_format)?
-            };
+            let l = requested.layout(size, target_format)?;
             storage = l.storage;
             TextureLayout {
                 bytes: l.texture_bytes as usize,
@@ -279,7 +276,7 @@ impl Context {
         format: TextureFormat,
         memory: super::TextureMemory,
     ) -> Result<Texture> {
-        self.allocate_texture(size, format, false, false, 1, memory)
+        self.allocate_texture(size, format, None, false, 1, memory)
     }
     /// Allocate a complete sampled chain; count includes the base level (SDK mipCount).
     pub fn create_mip_texture(
@@ -289,7 +286,7 @@ impl Context {
         count: u32,
         memory: super::TextureMemory,
     ) -> Result<Texture> {
-        self.allocate_texture(size, format, false, false, count, memory)
+        self.allocate_texture(size, format, None, false, count, memory)
     }
     /// Write rows of an ordinary uncompressed sampled mip texture after its readers finish.
     /// Source bytes are consumed synchronously; padding follows the native mip layout.
@@ -326,13 +323,24 @@ impl Context {
     }
     /// Allocate the exact storage and addressing reported by `target_layout`.
     pub fn create_target_texture(&self, size: [u32; 2], format: TargetFormat) -> Result<Texture> {
+        self.create_target_texture_with_storage(size, format, self.0.core.config.target_storage)
+    }
+    /// Allocate an offscreen target using the exact `storage.layout` footprint.
+    /// This overrides the context default for one allocation, allowing arbitrary
+    /// PTLA rectangles to retain linear storage alongside tiled effect targets.
+    pub fn create_target_texture_with_storage(
+        &self,
+        size: [u32; 2],
+        format: TargetFormat,
+        storage: TargetStorage,
+    ) -> Result<Texture> {
         self.allocate_texture(
             size,
             match format {
                 TargetFormat::Rgba8 => TextureFormat::Rgba8,
                 TargetFormat::Coverage8 => TextureFormat::Coverage8,
             },
-            true,
+            Some(storage),
             false,
             1,
             super::TextureMemory::Cdram,
@@ -342,7 +350,7 @@ impl Context {
         self.allocate_texture(
             size,
             TextureFormat::Rgba8,
-            true,
+            Some(TargetStorage::Linear),
             true,
             1,
             super::TextureMemory::Cdram,

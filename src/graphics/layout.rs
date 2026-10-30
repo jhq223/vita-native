@@ -9,6 +9,13 @@ pub enum TargetStorage {
     /// Scanline-ordered 32x32 tiles, with scanline texels within each tile.
     Tiled,
 }
+impl TargetStorage {
+    /// Exact offscreen footprint for this requested storage. Coverage8 and
+    /// surfaces smaller than one tile use linear addressing.
+    pub fn layout(self, size: [u32; 2], format: TargetFormat) -> Result<TargetLayout> {
+        target_layout_for(size, format, self)
+    }
+}
 #[cfg(any(target_os = "vita", test))]
 impl TargetStorage {
     pub(crate) fn byte_offset(self, x: usize, y: usize, stride: usize, bpp: usize) -> usize {
@@ -250,6 +257,19 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn tiled_admission_bounds_each_per_allocation_storage_choice() {
+        for w in (1..=4096).step_by(37) {
+            for h in (1..=4096).step_by(43) {
+                for format in [TargetFormat::Rgba8, TargetFormat::Coverage8] {
+                    let linear = TargetStorage::Linear.layout([w, h], format).unwrap();
+                    let tiled = TargetStorage::Tiled.layout([w, h], format).unwrap();
+                    assert!(tiled.texture_bytes >= linear.texture_bytes);
+                    assert_eq!(linear, target_layout([w, h], format).unwrap());
+                }
+            }
+        }
+    }
     #[test]
     fn tiled_target_footprints_and_offsets_match_gpu_tile_coordinates() {
         let l = target_layout_for([48, 40], TargetFormat::Rgba8, TargetStorage::Tiled).unwrap();

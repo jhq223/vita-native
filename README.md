@@ -101,8 +101,10 @@ fragment completion. Ordinary draws use one indexed stream.
 Textures select CDRAM or uncached MAIN through `TextureMemory`. Render targets
 select RGBA8 or single-channel alpha coverage through `TargetFormat`.
 `Config::target_storage` selects linear storage (default) or 32×32 tiled RGBA8
-storage. Small surfaces, Coverage8 and scanout stay linear. Allocation, color
-surface, sampler and CPU row conversion use the reported actual layout. Tiled
+storage. Small surfaces, Coverage8 and scanout stay linear.
+`Context::create_target_texture_with_storage` overrides the default for one
+allocation, using the exact footprint from `TargetStorage::layout`.
+Allocation, color surface, sampler and CPU row conversion use the reported actual layout. Tiled
 uploads wait for their own users. `Context::supports_texture_copy` admits linear
 rectangles and aligned tiled rectangles; applications use their drawing path for
 other layout/rectangle combinations. Tiled PTLA commands rebase complete tile-row
