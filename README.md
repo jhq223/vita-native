@@ -38,22 +38,21 @@ CRT initialization aborts if its kernel mutex or initial arena cannot be created
 The CRT creates one 1 MiB cached MAIN arena. Small allocations reuse this arena;
 growth obtains independent page-rounded MAIN blocks with their own system
 `sceClibMspace` and kernel UID. The 1 MiB minimum arena size follows the supported
-CPU page sizes and amortizes kernel allocation; only the first arena stays warm.
+CPU page sizes and amortizes kernel allocation; the first arena remains allocated for reuse.
 An empty additional arena returns its whole kernel block. A failed kernel release
 retains its UID and committed bytes for a later non-real-time retry.
 
 Ordinary and `_reent` allocation functions share the same ownership and kernel
 mutex. Zero-sized requests reserve a minimum object; `realloc(p, 0)` preserves
 newlib's minimum-object behavior. Failed reallocations retain the old object.
-Aligned allocation validates arithmetic and power-of-two alignment. No heap hook
-allocates Rust metadata, performs IO, or invokes application callbacks. Audio
-callbacks continue to use only their previously allocated buffers.
+Aligned allocation validates arithmetic and power-of-two alignment. Heap hooks
+use fixed metadata and native calls for allocation bookkeeping. Audio callbacks
+use their previously allocated buffers.
 
 Physical MAIN admission counts complete CPU arenas and native graphics blocks
 once, including arena headers and page rounding. Configuration observes current
-kernel free MAIN plus already committed managed blocks; it does not assume the
-entire extended SFO budget is free. Loaded code, existing stacks, SceLibc heaps
-and SDK allocations already reduce that observation. Later unmanaged allocations
+kernel free MAIN plus already committed managed blocks. Loaded code, existing
+stacks, SceLibc heaps and SDK allocations already reduce that observation. Later unmanaged allocations
 can still make kernel allocation fail. VM-local quotas remain independent:
 shared verified code is admitted by each VM but is physically stored once.
 `allocator::stats` reports committed capacity and the original release error.
@@ -91,7 +90,8 @@ the output register format; their draws use replacement mode.
 `Config::display_encoding` and `Context::framebuffer_encoded` can select sRGB
 writeback. These surfaces accept linear colors through `FragmentOutput::Srgb`
 half4 programs; the pixel backend encodes RGB on store and preserves alpha.
-Readback and sampled views expose the stored bytes; default surfaces remain linear.
+Readback and sampled views expose the stored bytes; default surfaces store RGBA8 directly.
+
 `ProgramDescriptor::instance` describes an optional second f32 stream indexed by
 instance number. `Draw::instances` supplies its immutable buffer and range; base
 indices wrap once per instance in original order. Each draw accepts at most
@@ -120,19 +120,15 @@ Each scanout buffer owns one persistent display sync object (three per context).
 Offscreen surfaces use ordered fragment scenes and fragment/transfer synchronization
 flags; their storage remains leased through completion notifications. Native accounting
 reports display sync object and scheduling target counts separately from bytes.
-The optional `profiling` feature adds fixed cumulative SDK call counts and CPU wall
-times to `MemoryUsage::submission_timing`, separating scene begin/end, uniform
-reservation, draw submission and three explicit notification wait causes. These
-measurements include SDK blocking; they do not measure GPU shader execution.
-EndScene samples the caller's kernel execution counter at most once per 100 ms,
-reporting paired wall/execution time, query overhead and original query errors.
-Notification publication and first normal-poll observation remain distinct; unmatched
-counts read notifications without retiring owners. Display-thread flip/vsync waits
-are separate. One latest EndScene sample of at least 1 ms records the shared target,
-notification generation, draw/index/triangle counts and outstanding work before/after
-the call. Counters use fixed storage and existing completion tokens carry their inline
-diagnostics; no additional per-call allocation or GPU work is introduced.
-Builds without this feature erase the timers and return zero timing values.
+The optional `profiling` feature records SDK call counts and CPU wall time in
+`MemoryUsage::submission_timing`. It separates scene submission, uniform setup,
+drawing, notification waits and display-thread waits. EndScene also samples the
+calling thread's execution time at most once per 100 ms. These CPU measurements
+include SDK blocking; GPU execution time requires a separate measurement.
+Completion counters record notification publication and the first normal-poll
+observation. Diagnostics use fixed storage. See the [timing fields](src/graphics/types.rs)
+for sample contents and units. Builds without this feature return zero timing values.
+
 Compatible color surfaces share bounded firmware scheduling targets. Configured
 budgets account for kernel capacity, live payload and infrastructure separately.
 Mapped arenas segregate small, medium and whole-block resources. Upload staging
