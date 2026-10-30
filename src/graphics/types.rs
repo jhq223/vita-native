@@ -147,6 +147,10 @@ pub struct Config {
     pub patcher_fragment_usse_bytes: u32,
     /// Queued scenes per shared scheduling target: 1..=8, default 4.
     pub scenes_per_frame: u16,
+    /// Offscreen RGBA8 addressing; default linear. Tiled requests use complete
+    /// 32x32 storage tiles when both dimensions are at least 32; smaller targets,
+    /// Coverage8 and display scanout retain linear storage.
+    pub target_storage: super::TargetStorage,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -166,6 +170,7 @@ impl Default for Config {
             patcher_vertex_usse_bytes: 256 * 1024,
             patcher_fragment_usse_bytes: 512 * 1024,
             scenes_per_frame: 4,
+            target_storage: super::TargetStorage::Linear,
         }
     }
 }

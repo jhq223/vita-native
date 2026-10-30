@@ -1,12 +1,41 @@
 //! One layout calculation drives mapping, texture views and resource accounting.
 use super::{Error, TargetFormat, TextureFormat, types::Result};
-/// Exact single-sample target storage including the strided-view row padding.
+/// Requested offscreen color layout. Small surfaces and Coverage8 remain linear.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TargetStorage {
+    /// Rows in scanline order, with the format's native row padding.
+    #[default]
+    Linear,
+    /// Scanline-ordered 32x32 tiles, with scanline texels within each tile.
+    Tiled,
+}
+#[cfg(any(target_os = "vita", test))]
+impl TargetStorage {
+    pub(crate) fn byte_offset(self, x: usize, y: usize, stride: usize, bpp: usize) -> usize {
+        match self {
+            Self::Linear => y * stride + x * bpp,
+            Self::Tiled => {
+                (y / 32) * stride * 32 + (x / 32) * 1024 * bpp + ((y % 32) * 32 + x % 32) * bpp
+            }
+        }
+    }
+    pub(crate) fn row_run(self, x: usize, remaining: usize) -> usize {
+        match self {
+            Self::Linear => remaining,
+            Self::Tiled => remaining.min(32 - x % 32),
+        }
+    }
+}
+/// Exact single-sample target storage including row or complete-tile padding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TargetLayout {
-    /// Color payload bytes, including the actual row pitch.
+    /// Color payload bytes, including complete row or tile padding.
     pub texture_bytes: u64,
-    /// Distance in bytes between consecutive stored rows.
+    /// Bytes per logical scanline including padding. For tiled storage this is
+    /// the tile-row width divided by 32, not a consecutive CPU row address.
     pub row_stride_bytes: u64,
+    /// Actual addressing used by the color surface and sampled view.
+    pub storage: TargetStorage,
 }
 /// Target color storage and independently owned firmware scheduling storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,7 +50,8 @@ pub struct TargetFootprint {
 pub struct TextureLayout {
     /// Exact mapped payload bytes; excludes suballocator alignment gaps.
     pub bytes: usize,
-    /// Distance in bytes between consecutive stored rows.
+    /// Scanline stride including padding. Tiled render-target views split rows
+    /// across tiles; `Texture::target_storage` identifies their addressing.
     pub row_stride_bytes: usize,
 }
 pub(crate) fn validate_size(size: [u32; 2]) -> Result<()> {
@@ -30,10 +60,29 @@ pub(crate) fn validate_size(size: [u32; 2]) -> Result<()> {
     }
     Ok(())
 }
-/// Render-target layout shared by allocation and planning. Surface pitch is in
-/// pixels; a strided sampled view additionally requires four-byte row alignment.
+/// Default linear render-target layout. Contexts report their configured actual
+/// layout through `Context::target_layout`; surface and sampled-view row alignment
+/// are included in both calculations.
 pub fn target_layout(size: [u32; 2], format: TargetFormat) -> Result<TargetLayout> {
+    target_layout_for(size, format, TargetStorage::Linear)
+}
+pub(crate) fn target_layout_for(
+    size: [u32; 2],
+    format: TargetFormat,
+    storage: TargetStorage,
+) -> Result<TargetLayout> {
     validate_size(size)?;
+    if storage == TargetStorage::Tiled
+        && format == TargetFormat::Rgba8
+        && size.iter().all(|n| *n >= 32)
+    {
+        let row = u64::from(size[0]).next_multiple_of(32) * 4;
+        return Ok(TargetLayout {
+            texture_bytes: row * u64::from(size[1]).next_multiple_of(32),
+            row_stride_bytes: row,
+            storage,
+        });
+    }
     let row = match format {
         TargetFormat::Rgba8 => (size[0] as u64).next_multiple_of(2) * 4,
         TargetFormat::Coverage8 => (size[0] as u64).next_multiple_of(4),
@@ -41,6 +90,7 @@ pub fn target_layout(size: [u32; 2], format: TargetFormat) -> Result<TargetLayou
     Ok(TargetLayout {
         texture_bytes: row * u64::from(size[1]),
         row_stride_bytes: row,
+        storage: TargetStorage::Linear,
     })
 }
 /// Pure ordinary sampled-texture layout, used before native allocation/admission.
@@ -200,6 +250,80 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn tiled_target_footprints_and_offsets_match_gpu_tile_coordinates() {
+        let l = target_layout_for([48, 40], TargetFormat::Rgba8, TargetStorage::Tiled).unwrap();
+        assert_eq!((l.texture_bytes, l.row_stride_bytes), (64 * 64 * 4, 64 * 4));
+        assert_eq!(l.storage, TargetStorage::Tiled);
+        for (point, pixel) in [
+            ([0, 0], 0),
+            ([31, 31], 1023),
+            ([32, 0], 1024),
+            ([0, 32], 2048),
+            ([32, 32], 3072),
+        ] {
+            assert_eq!(
+                l.storage
+                    .byte_offset(point[0], point[1], l.row_stride_bytes as usize, 4),
+                pixel * 4
+            );
+        }
+        for size in [[31, 64], [64, 31], [1, 1]] {
+            assert_eq!(
+                target_layout_for(size, TargetFormat::Rgba8, TargetStorage::Tiled).unwrap(),
+                target_layout(size, TargetFormat::Rgba8).unwrap()
+            );
+        }
+        assert_eq!(
+            target_layout_for([64, 64], TargetFormat::Coverage8, TargetStorage::Tiled).unwrap(),
+            target_layout([64, 64], TargetFormat::Coverage8).unwrap()
+        );
+        assert!(target_layout_for([0, 64], TargetFormat::Rgba8, TargetStorage::Tiled).is_err());
+        assert!(target_layout_for([4097, 64], TargetFormat::Rgba8, TargetStorage::Tiled).is_err());
+    }
+
+    #[test]
+    fn tiled_rows_cross_tiles_without_aliasing_or_exposing_padding() {
+        for size in [[32, 32], [33, 37], [137, 93], [513, 33]] {
+            let l = target_layout_for(size, TargetFormat::Rgba8, TargetStorage::Tiled).unwrap();
+            let mut pixels = vec![0xa5; l.texture_bytes as usize];
+            let mut touched = vec![false; pixels.len() / 4];
+            for y in 0..size[1] as usize {
+                let mut x = 0;
+                while x < size[0] as usize {
+                    let run = l.storage.row_run(x, size[0] as usize - x);
+                    assert!((1..=32).contains(&run));
+                    let at = l.storage.byte_offset(x, y, l.row_stride_bytes as usize, 4);
+                    for i in 0..run {
+                        assert!(!std::mem::replace(&mut touched[at / 4 + i], true));
+                        pixels[at + i * 4..at + (i + 1) * 4].copy_from_slice(
+                            &((y * size[0] as usize + x + i) as u32).to_le_bytes(),
+                        );
+                    }
+                    x += run;
+                }
+            }
+            for y in 0..size[1] as usize {
+                for x in 0..size[0] as usize {
+                    let at = l.storage.byte_offset(x, y, l.row_stride_bytes as usize, 4);
+                    assert_eq!(
+                        u32::from_le_bytes(pixels[at..at + 4].try_into().unwrap()),
+                        (y * size[0] as usize + x) as u32
+                    );
+                }
+            }
+            assert_eq!(
+                touched.iter().filter(|&&v| v).count(),
+                size[0] as usize * size[1] as usize
+            );
+            assert!(
+                pixels
+                    .chunks_exact(4)
+                    .zip(touched)
+                    .all(|(p, touched)| touched || p == [0xa5; 4])
+            );
+        }
+    }
     #[test]
     fn mip_offsets_match_official_npot_table_and_bc_tails() {
         let offsets = [32768, 8192, 2048, 512, 128, 32, 16, 8];

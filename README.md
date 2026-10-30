@@ -99,8 +99,12 @@ indices wrap once per instance in original order. Each draw accepts at most
 fragment completion. Ordinary draws use one indexed stream.
 
 Textures select CDRAM or uncached MAIN through `TextureMemory`. Render targets
-select RGBA8 or single-channel alpha coverage through `TargetFormat`; their strided
-layout, color surface and sampling view share the same format-specific pitch.
+select RGBA8 or single-channel alpha coverage through `TargetFormat`.
+`Config::target_storage` selects linear storage (default) or 32×32 tiled RGBA8
+storage. Small surfaces, Coverage8 and scanout stay linear. Allocation, color
+surface, sampler and CPU row conversion use the reported actual layout. Tiled
+uploads wait for their own users; arbitrary PTLA rectangle copies use linear
+targets, so applications retain their drawing path for tiled targets.
 Render targets and scanout use CDRAM; applications choose sampled-image placement to balance capacity
 and bandwidth. `MemoryUsage` reports each physical arena separately. CDRAM admission includes scanout and all mapped pixel blocks; the SDK parameter
 buffer is deducted before this shared domain is initialized.

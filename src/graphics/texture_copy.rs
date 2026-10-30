@@ -110,10 +110,10 @@ impl super::Context {
         use vitasdk_sys::*;
         self.same(&source.0.owner)?;
         self.same(&destination.0.owner)?;
-        if [source, destination]
-            .into_iter()
-            .any(|texture| texture.format() != TextureFormat::Rgba8 || !texture.0.strided)
-        {
+        if [source, destination].into_iter().any(|texture| {
+            texture.format() != TextureFormat::Rgba8
+                || texture.target_storage() != Some(super::TargetStorage::Linear)
+        }) {
             return Err(Error::Unsupported(
                 "texture copy requires RGBA8 render targets",
             ));

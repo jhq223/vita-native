@@ -17,6 +17,7 @@ pub(super) struct TextureInner {
     pub format: TextureFormat,
     pub layout: TextureLayout,
     pub strided: bool,
+    pub storage: TargetStorage,
     pub mip_count: u32,
     pub owner: Rc<Core>,
 }
@@ -46,9 +47,15 @@ impl Texture {
     pub fn mip_count(&self) -> u32 {
         self.0.mip_count
     }
-    /// Exact native row pitch and payload bytes.
+    /// Exact payload and scanline stride. Consult `target_storage` before CPU
+    /// addressing: tiled scanlines are split across 32x32 storage tiles.
     pub fn layout(&self) -> TextureLayout {
         self.0.layout
+    }
+    /// Actual offscreen addressing, or `None` for ordinary sampled textures and
+    /// imported video. Arbitrary PTLA subrectangle copies require linear targets.
+    pub fn target_storage(&self) -> Option<TargetStorage> {
+        self.0.strided.then_some(self.0.storage)
     }
     /// Live payload bytes; native slab capacity is reported separately.
     pub fn allocated_bytes(&self) -> usize {
@@ -138,9 +145,10 @@ impl Context {
     pub fn texture_layout(&self, size: [u32; 2], format: TextureFormat) -> Result<TextureLayout> {
         texture_layout(size, format)
     }
-    /// Strided color storage including format-specific surface and texture pitch alignment.
+    /// Configured offscreen color storage including row or complete-tile padding.
+    /// The returned storage kind also controls allocation and texture sampling.
     pub fn target_layout(&self, size: [u32; 2], format: TargetFormat) -> Result<TargetLayout> {
-        target_layout(size, format)
+        layout::target_layout_for(size, format, self.0.core.config.target_storage)
     }
     /// Query one shared scheduling class with the configured scene capacity.
     /// Color storage retains its exact extent; compatible surfaces share driver bytes.
@@ -176,13 +184,19 @@ impl Context {
         memory: super::TextureMemory,
     ) -> Result<Texture> {
         self.check("texture creation")?;
+        let mut storage = TargetStorage::Linear;
         let l = if strided {
             let target_format = match format {
                 TextureFormat::Rgba8 | TextureFormat::Bgra8 => TargetFormat::Rgba8,
                 TextureFormat::Coverage8 => TargetFormat::Coverage8,
                 _ => return Err(Error::Unsupported("strided target format")),
             };
-            let l = self.target_layout(size, target_format)?;
+            let l = if display {
+                target_layout(size, target_format)?
+            } else {
+                self.target_layout(size, target_format)?
+            };
+            storage = l.storage;
             TextureLayout {
                 bytes: l.texture_bytes as usize,
                 row_stride_bytes: l.row_stride_bytes as usize,
@@ -209,6 +223,15 @@ impl Context {
                     size[0],
                     size[1],
                     mip_count,
+                )
+            } else if storage == TargetStorage::Tiled {
+                sceGxmTextureInitTiled(
+                    &mut raw,
+                    allocation.ptr().cast(),
+                    texture_format(format),
+                    size[0],
+                    size[1],
+                    1,
                 )
             } else if strided {
                 sceGxmTextureInitLinearStrided(
@@ -244,6 +267,7 @@ impl Context {
             format,
             layout: l,
             strided,
+            storage,
             mip_count,
             owner: self.0.core.clone(),
         })))
@@ -300,7 +324,7 @@ impl Context {
         }
         Ok(())
     }
-    /// Allocate the same explicit row pitch reported by `target_layout`.
+    /// Allocate the exact storage and addressing reported by `target_layout`.
     pub fn create_target_texture(&self, size: [u32; 2], format: TargetFormat) -> Result<Texture> {
         self.allocate_texture(
             size,
@@ -378,8 +402,9 @@ impl Context {
         t.0.allocation.write(0, blocks);
         Ok(())
     }
-    /// Consume CPU rows before returning. In-flight textures use staged GPU copies,
-    /// ordered between fragment scenes and retired by a transfer notification.
+    /// Consume CPU rows before returning. In-flight linear textures use staged
+    /// GPU copies ordered between fragment scenes. Tiled targets wait for their
+    /// own users and scatter CPU rows into the configured tile layout.
     pub fn upload(
         &self,
         t: &Texture,
@@ -404,6 +429,32 @@ impl Context {
             })
         {
             return Err(Error::Invalid("texture upload bounds"));
+        }
+        if t.0.storage == TargetStorage::Tiled {
+            // PTLA tiled transfers require aligned whole tiles, zero origins and
+            // typed formats. Arbitrary CPU uploads instead wait for their own
+            // users and scatter rows through the same layout as native readback.
+            self.await_allocation(&t.0.allocation)?;
+            for y in 0..size[1] as usize {
+                let mut x = 0;
+                while x < size[0] as usize {
+                    let count =
+                        t.0.storage
+                            .row_run(origin[0] as usize + x, size[0] as usize - x);
+                    let offset = t.0.storage.byte_offset(
+                        origin[0] as usize + x,
+                        origin[1] as usize + y,
+                        t.0.layout.row_stride_bytes,
+                        bpp,
+                    );
+                    t.0.allocation.write(
+                        offset,
+                        &data[y * stride + x * bpp..y * stride + (x + count) * bpp],
+                    );
+                    x += count;
+                }
+            }
+            return Ok(());
         }
         if !t.0.allocation.used() {
             for y in 0..size[1] as usize {
@@ -626,7 +677,11 @@ impl Context {
             sceGxmColorSurfaceInit(
                 &mut surface,
                 format,
-                SCE_GXM_COLOR_SURFACE_LINEAR,
+                if t.0.storage == TargetStorage::Tiled {
+                    SCE_GXM_COLOR_SURFACE_TILED
+                } else {
+                    SCE_GXM_COLOR_SURFACE_LINEAR
+                },
                 SCE_GXM_COLOR_SURFACE_SCALE_NONE,
                 if encoding == SurfaceEncoding::Srgb {
                     SCE_GXM_OUTPUT_REGISTER_SIZE_64BIT
@@ -640,7 +695,7 @@ impl Context {
             )
         })?;
         if encoding == SurfaceEncoding::Srgb {
-            // SAFETY: the initialized linear RGBA8/BGRA8 surface uses half4
+            // SAFETY: the initialized RGBA8/BGRA8 surface uses half4
             // registers. RGB conversion occurs only when its tiles are stored.
             sdk("sceGxmColorSurfaceSetGammaMode", unsafe {
                 sceGxmColorSurfaceSetGammaMode(&mut surface, SCE_GXM_COLOR_SURFACE_GAMMA_BGR)
@@ -851,17 +906,24 @@ impl Context {
         }
         let t = &target.0.texture;
         self.await_allocation(&t.0.allocation)?;
+        // SAFETY: this context owns the mapped allocation and all submitted
+        // users have completed. Layout offsets stay within its charged payload.
+        let source = unsafe {
+            core::slice::from_raw_parts(t.0.allocation.ptr().cast::<u8>(), t.0.layout.bytes)
+        };
         for (y, dest) in output.chunks_exact_mut(row).enumerate() {
-            let source = unsafe {
-                core::slice::from_raw_parts(
-                    t.0.allocation
-                        .ptr()
-                        .cast::<u8>()
-                        .add((first_row as usize + y) * t.0.layout.row_stride_bytes),
-                    row,
-                )
-            };
-            dest.copy_from_slice(source);
+            let mut x = 0;
+            while x < target.size()[0] as usize {
+                let count = t.0.storage.row_run(x, target.size()[0] as usize - x);
+                let offset = t.0.storage.byte_offset(
+                    x,
+                    first_row as usize + y,
+                    t.0.layout.row_stride_bytes,
+                    4,
+                );
+                dest[x * 4..(x + count) * 4].copy_from_slice(&source[offset..offset + count * 4]);
+                x += count;
+            }
         }
         Ok(())
     }

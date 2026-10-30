@@ -103,7 +103,10 @@ EndScene 每 100 ms 最多抽样一次调用线程的内核执行计数，分别
 保留块继续计入对应物理域的占用。
 
 纹理通过 `TextureMemory` 选择 CDRAM 或无 CPU 缓存的 MAIN 内存。渲染目标通过
-`TargetFormat` 选择 RGBA8 或单通道 alpha 覆盖，布局、色表面和采样视图共用格式对应的行距。
+`TargetFormat` 选择 RGBA8 或单通道 alpha 覆盖。`Config::target_storage` 选择默认线性存储或
+32×32 tiled RGBA8 存储；小表面、Coverage8 和扫描输出保持线性。分配、色表面、采样与 CPU
+行转换使用报告的实际布局。tiled 上传等待自身使用者完成；任意 PTLA 矩形复制使用线性目标，
+应用为 tiled 目标保留绘制路径。
 渲染目标与扫描输出使用 CDRAM；应用按容量和带宽需求安排源图片。`MemoryUsage` 分别记录各物理池；
 CDRAM 准入包含扫描输出和所有像素块，SDK 参数缓冲在初始化该物理域前扣除。
 
