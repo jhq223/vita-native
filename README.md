@@ -8,7 +8,7 @@ Native calls use `vitasdk-sys = 0.3.3` and the VitaSDK import libraries.
 | Feature | Interface |
 | --- | --- |
 | `graphics` | GXM contexts, offline GXP programs, textures, buffers, commands, completion and presentation |
-| `app` | Application identity, controller/touch input, IME, power callbacks, IO and memory |
+| `app` | Application identity, controller/touch input, IME, power configuration/callbacks, IO and memory |
 | `process-allocator` | One growing C/newlib/Rust process heap backed by independent system mspaces |
 | `audio` | Fixed-buffer AudioOut playback with explicit pause and drain |
 | `video` | AvPlayer decoding from a seekable stream into caller-owned video and PCM buffers |

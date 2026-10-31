@@ -1,6 +1,59 @@
-//! Native power notifications retained in order until the owner drains them.
+//! Native power configuration and ordered notifications.
 use super::{Error, sdk, time, wake::Wake};
-use std::{cell::UnsafeCell, marker::PhantomData, prelude::v1::*, rc::Rc, sync::Arc};
+use std::{
+    cell::UnsafeCell,
+    marker::PhantomData,
+    prelude::v1::*,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
+
+/// Sony power configurations, expressed without a fixed GPU frequency in MHz.
+///
+/// The Power Service Overview, "Power Configuration Control", defines these
+/// modes. Applications choose a mode explicitly and may observe the resulting
+/// clocks through `clock_frequencies` when `profiling` is enabled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigurationMode {
+    /// Normal GPU clock with WLAN/COM available; the process startup mode.
+    A,
+    /// High GPU clock with WLAN/COM unavailable.
+    B,
+    /// High GPU clock with WLAN/COM available. Screen brightness is limited
+    /// and the camera is unavailable. PlayStation TV has no brightness limit.
+    C,
+}
+
+/// Request a Sony power configuration through `scePowerSetConfigurationMode`.
+///
+/// Calls through this function are serialized because the SDK operation is not
+/// multithread safe. Call during application setup or another explicit host
+/// transition; execution time varies by device. The SDK returns zero on success
+/// and a negative error code on failure, retained in [`Error`].
+///
+/// The selected mode controls the GPU clock and the services documented by
+/// [`ConfigurationMode`]. Sony does not specify a GPU frequency in MHz. Callers
+/// measuring a configuration change should observe all clocks before and after
+/// the request and record the request result with those observations.
+pub fn request_configuration(mode: ConfigurationMode) -> Result<(), Error> {
+    static CONFIGURATION: Mutex<()> = Mutex::new(());
+    // This lock contains no data; recovering a poisoned guard still serializes
+    // the native call without asserting that an earlier request succeeded.
+    let _guard = CONFIGURATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let conf = match mode {
+        ConfigurationMode::A => sdk::SCE_POWER_CONFIGURATION_MODE_A,
+        ConfigurationMode::B => sdk::SCE_POWER_CONFIGURATION_MODE_B,
+        ConfigurationMode::C => sdk::SCE_POWER_CONFIGURATION_MODE_C,
+    };
+    // SAFETY: the enum supplies a documented mode and the lock serializes calls
+    // to the SDK operation. No pointer or borrowed storage crosses the boundary.
+    Error::check("scePowerSetConfigurationMode", unsafe {
+        sdk::scePowerSetConfigurationMode(conf as i32)
+    })
+    .map(|_| ())
+}
 
 /// Read-only clock observations. Each failed query retains its native error.
 #[cfg(feature = "profiling")]
