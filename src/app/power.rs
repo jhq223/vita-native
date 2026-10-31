@@ -2,6 +2,47 @@
 use super::{Error, sdk, time, wake::Wake};
 use std::{cell::UnsafeCell, marker::PhantomData, prelude::v1::*, rc::Rc, sync::Arc};
 
+/// Read-only clock observations. Each failed query retains its native error.
+#[cfg(feature = "profiling")]
+pub struct ClockFrequencies {
+    /// Reported ARM clock in MHz.
+    pub arm_mhz: Result<u32, Error>,
+    /// Reported GPU clock in MHz.
+    pub gpu_mhz: Result<u32, Error>,
+    /// Reported bus clock in MHz.
+    pub bus_mhz: Result<u32, Error>,
+    /// Reported GPU crossbar clock in MHz.
+    pub gpu_xbar_mhz: Result<u32, Error>,
+}
+
+/// Read the current hardware clock frequencies.
+/// Units follow VitaSDK's psp2/power.h query contract.
+#[cfg(feature = "profiling")]
+pub fn clock_frequencies() -> ClockFrequencies {
+    let read = |operation, value| Error::check(operation, value).map(|value| value as u32);
+    // SAFETY: scalar ScePower queries, with no pointers or retained ownership.
+    unsafe {
+        ClockFrequencies {
+            arm_mhz: read(
+                "scePowerGetArmClockFrequency",
+                sdk::scePowerGetArmClockFrequency(),
+            ),
+            gpu_mhz: read(
+                "scePowerGetGpuClockFrequency",
+                sdk::scePowerGetGpuClockFrequency(),
+            ),
+            bus_mhz: read(
+                "scePowerGetBusClockFrequency",
+                sdk::scePowerGetBusClockFrequency(),
+            ),
+            gpu_xbar_mhz: read(
+                "scePowerGetGpuXbarClockFrequency",
+                sdk::scePowerGetGpuXbarClockFrequency(),
+            ),
+        }
+    }
+}
+
 /// An actual application power transition reported by the SDK.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PowerKind {

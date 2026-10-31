@@ -129,27 +129,13 @@ pub(super) struct ThreadQuery {
 impl ThreadQuery {
     fn read() -> Self {
         let started_us = clock_us();
-        // SAFETY: the SDK fills an exclusive, zero-initialized fixed-size struct;
-        // SELF queries only the issuing thread and retains no pointer. Profiling
-        // never uses query results for control flow or replaces a graphics error.
-        let mut info: vitasdk_sys::SceKernelThreadInfo = unsafe { core::mem::zeroed() };
-        info.size = core::mem::size_of_val(&info) as u32;
-        // SAFETY: SELF is the current caller; `info` has the SDK size and remains
-        // exclusive until the synchronous query returns. No pointer is retained.
-        let code = unsafe {
-            vitasdk_sys::sceKernelGetThreadInfo(
-                vitasdk_sys::SCE_KERNEL_THREAD_ID_SELF as i32,
-                &mut info,
-            )
-        };
+        let observed = crate::thread_runtime::read();
         Self {
             started_us,
             ended_us: clock_us(),
-            run_us: if code < 0 {
-                Err(code)
-            } else {
-                Ok(info.runClocks)
-            },
+            run_us: observed
+                .map(|value| value.run_micros)
+                .map_err(|(_, code)| code),
         }
     }
 }

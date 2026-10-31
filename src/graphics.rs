@@ -40,8 +40,8 @@ mod uniform_layout;
 mod vertex_layout;
 pub use diagnostics::*;
 pub use layout::{
-    MipLayout, TargetFootprint, TargetLayout, TextureLayout, mip_layout, mip_texture_layout,
-    target_layout, texture_layout,
+    MipLayout, TargetFootprint, TargetLayout, TargetStorage, TextureLayout, mip_layout,
+    mip_texture_layout, target_layout, texture_layout,
 };
 pub use types::*;
 #[cfg(target_os = "vita")]

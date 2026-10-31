@@ -107,11 +107,17 @@ alpha 保持线性。读回和采样视图返回存储字节；默认表面直�
 保留块继续计入对应物理域的占用。
 
 纹理通过 `TextureMemory` 选择 CDRAM 或无 CPU 缓存的 MAIN 内存。渲染目标通过
-`TargetFormat` 选择 RGBA8 或单通道 alpha 覆盖，布局、色表面和采样视图共用格式对应的行距。
+`TargetFormat` 选择 RGBA8 或单通道 alpha 覆盖。`Config::target_storage` 选择默认线性存储或
+32×32 tiled RGBA8 存储；小表面、Coverage8 和扫描输出保持线性。
+`Context::create_target_texture_with_storage` 按 `TargetStorage::layout` 为单次分配覆盖默认布局。
+分配、色表面、采样与 CPU
+行转换使用报告的实际布局。tiled 上传等待自身使用者完成；`Context::supports_texture_copy`
+接纳线性矩形与对齐的 tiled 矩形，其余组合使用绘制路径。tiled PTLA 按完整 tile 行分条，
+每条重设基地址，使原生原点为零、命令行距与宽度一致。
 渲染目标与扫描输出使用 CDRAM；应用按容量和带宽需求安排源图片。`MemoryUsage` 分别记录各物理池；
 CDRAM 准入包含扫描输出和所有像素块，SDK 参数缓冲在初始化该物理域前扣除。
 
-`Context::copy_texture` 通过 PTLA 在独立的 RGBA8 strided 渲染目标间复制无缩放子矩形。
+`Context::copy_texture` 通过 PTLA 在独立的 RGBA8 渲染目标间复制布局兼容的无缩放子矩形。
 片元/传输依赖及最后完成通知保留两端分配；其他格式由应用沿用绘制路径。
 
 ## 所有权与线程
