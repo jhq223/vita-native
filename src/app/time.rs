@@ -4,10 +4,6 @@ use std::{prelude::v1::*, time::Duration};
 
 #[cfg(feature = "profiling")]
 pub use crate::thread_runtime::ThreadRuntime;
-#[cfg(feature = "profiling")]
-mod pmon;
-#[cfg(feature = "profiling")]
-pub use pmon::{Pmon, PmonSample};
 
 /// Observe the caller's cumulative CPU execution and current scheduling state.
 /// `run_micros` excludes time while descheduled. Query work is included at paired

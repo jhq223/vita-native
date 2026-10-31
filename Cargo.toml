@@ -8,7 +8,7 @@ description = "Owned GXM graphics, application services, audio and video for Pla
 repository = "https://github.com/jhq223/vita-native"
 
 [features]
-profiling = ["vitasdk-sys/ScePerf_stub"]
+profiling = []
 process-allocator = ["app"]
 default = ["app", "graphics", "audio"]
 app = ["vitasdk-sys/SceLibKernel_stub", "vitasdk-sys/SceKernelThreadMgr_stub", "vitasdk-sys/SceProcessmgr_stub", "vitasdk-sys/SceRtc_stub", "vitasdk-sys/SceCtrl_stub", "vitasdk-sys/SceTouch_stub", "vitasdk-sys/ScePower_stub", "vitasdk-sys/SceIofilemgr_stub", "vitasdk-sys/SceAppMgr_stub", "vitasdk-sys/SceIme_stub", "vitasdk-sys/SceSysmodule_stub"]
