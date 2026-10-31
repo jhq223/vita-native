@@ -5,7 +5,8 @@
 pub struct ThreadRuntime {
     /// Native thread identity; compare only samples of the same thread.
     pub thread_id: i32,
-    /// Cumulative time this thread actually ran, excluding descheduled intervals.
+    /// Raw kernel-reported execution microseconds, excluding descheduled time.
+    /// Updates may settle at scheduling boundaries rather than at every query.
     pub run_micros: u64,
     /// Current scheduling priority, as reported by the SDK.
     pub priority: i32,
