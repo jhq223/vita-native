@@ -65,6 +65,8 @@ impl Context {
     /// translate viewport/scissor into the selected cell and reject backward
     /// writes or feedback from the current/later cell. Each intermediate stage
     /// is stored as RGBA8 before the next cell samples it.
+    /// Clear each cell before its first draw to initialize the complete physical
+    /// extent, including padding outside the logical sampled view.
     pub fn create_macrotile_target(
         &self,
         layout: MacrotileLayout,
