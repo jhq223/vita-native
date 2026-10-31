@@ -8,6 +8,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+static CONFIGURATION: Mutex<()> = Mutex::new(());
+
 /// Sony power configurations, expressed without a fixed GPU frequency in MHz.
 ///
 /// The Power Service Overview, "Power Configuration Control", defines these
@@ -36,7 +38,6 @@ pub enum ConfigurationMode {
 /// measuring a configuration change should observe all clocks before and after
 /// the request and record the request result with those observations.
 pub fn request_configuration(mode: ConfigurationMode) -> Result<(), Error> {
-    static CONFIGURATION: Mutex<()> = Mutex::new(());
     // This lock contains no data; recovering a poisoned guard still serializes
     // the native call without asserting that an earlier request succeeded.
     let _guard = CONFIGURATION
@@ -51,6 +52,24 @@ pub fn request_configuration(mode: ConfigurationMode) -> Result<(), Error> {
     // to the SDK operation. No pointer or borrowed storage crosses the boundary.
     Error::check("scePowerSetConfigurationMode", unsafe {
         sdk::scePowerSetConfigurationMode(conf as i32)
+    })
+    .map(|_| ())
+}
+
+/// Request the ARM CPU clock frequency in MHz through VitaSDK's power API.
+///
+/// Firmware validates supported frequencies; failures retain the native error
+/// code. Requests are serialized with power configuration changes. A system
+/// power plugin may override the request, so profiling callers should observe
+/// the resulting frequency with `clock_frequencies`.
+pub fn request_arm_clock_frequency(megahertz: i32) -> Result<(), Error> {
+    let _guard = CONFIGURATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: this scalar request has no pointers or retained ownership. The
+    // firmware validates the frequency and calls through this API are serialized.
+    Error::check("scePowerSetArmClockFrequency", unsafe {
+        sdk::scePowerSetArmClockFrequency(megahertz)
     })
     .map(|_| ())
 }
