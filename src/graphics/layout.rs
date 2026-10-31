@@ -338,9 +338,11 @@ mod tests {
             );
             assert!(
                 pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .zip(touched)
-                    .all(|(p, touched)| touched || p == [0xa5; 4])
+                    .all(|(p, touched)| touched || *p == [0xa5; 4])
             );
         }
     }

@@ -103,14 +103,24 @@ impl Context {
     }
     fn begin(&self, target: Framebuffer, size: [u32; 2]) -> Result<()> {
         let mut s = self.0.state.borrow_mut();
-        if let Some(recording) = &mut s.recording
-            && Rc::ptr_eq(&recording.target.0, &target.0)
-        {
-            if recording.size != size {
-                self.viewport(size);
+        if let Some(recording) = &mut s.recording {
+            let same_macrotile = match (recording.target.macrocell(), target.macrocell()) {
+                (Some(previous), Some(next)) => next.follows(previous)?,
+                _ => false,
+            };
+            if Rc::ptr_eq(&recording.target.0, &target.0) || same_macrotile {
+                self.viewport(target.origin(), size);
                 recording.size = size;
+                if same_macrotile {
+                    Self::retain(
+                        recording,
+                        Lease::Allocation(target.0.texture.0.allocation.clone()),
+                    );
+                    Self::retain(recording, Lease::Target(target.clone()));
+                    recording.target = target;
+                }
+                return Ok(());
             }
-            return Ok(());
         }
         self.end_scene(&mut s)?;
         let (slot, n) = self.reserve_slot(&mut s)?;
@@ -123,7 +133,11 @@ impl Context {
                 self.0.core.native.context,
                 SCE_GXM_SCENE_FRAGMENT_TRANSFER_SYNC,
                 target.0.target.raw,
-                &region,
+                if target.macrocell().is_some() {
+                    core::ptr::null()
+                } else {
+                    &region
+                },
                 core::ptr::null_mut(),
                 // Fragment scenes execute in order; transfer flags above establish
                 // transfer dependencies. This object only gates display queue access.
@@ -133,6 +147,7 @@ impl Context {
             )
         });
         let allocation = target.0.texture.0.allocation.clone();
+        let origin = target.origin();
         s.recording = Some(Recording {
             target: target.clone(),
             leases: std::vec![Lease::Allocation(allocation), Lease::Target(target)],
@@ -144,11 +159,11 @@ impl Context {
         });
         self.command("sceGxmBeginScene", code)?;
         self.0.bindings.borrow_mut().begin_scene();
-        self.viewport(size);
+        self.viewport(origin, size);
         Ok(())
     }
-    fn viewport(&self, size: [u32; 2]) {
-        if !self.0.bindings.borrow_mut().viewport(size) {
+    fn viewport(&self, origin: [u32; 2], size: [u32; 2]) {
+        if !self.0.bindings.borrow_mut().viewport(origin, size) {
             return;
         }
         // SAFETY: recording owns a live immediate context. Viewport changes are
@@ -157,9 +172,9 @@ impl Context {
             let c = self.0.core.native.context;
             sceGxmSetViewport(
                 c,
+                origin[0] as f32 + size[0] as f32 * 0.5,
                 size[0] as f32 * 0.5,
-                size[0] as f32 * 0.5,
-                size[1] as f32 * 0.5,
+                origin[1] as f32 + size[1] as f32 * 0.5,
                 -(size[1] as f32) * 0.5,
                 0.5,
                 0.5,
@@ -269,6 +284,13 @@ impl Context {
             if Rc::ptr_eq(&t.0, &target.0.texture.0) {
                 return Err(Error::Invalid("same scene texture feedback"));
             }
+            if let (Some(source), Some(destination)) = (t.0.macrocell, target.macrocell())
+                && !destination.reads(source)
+            {
+                return Err(Error::Invalid(
+                    "macrotile feedback requires an earlier cell",
+                ));
+            }
         }
         for u in d.uniforms {
             if !Rc::ptr_eq(&u.uniform().program.0, &d.program.0) {
@@ -298,6 +320,11 @@ impl Context {
             }
             (identity.as_ref().expect("identity indices").clone(), 4)
         };
+        // A cell-aligned origin preserves the existing logical viewport and
+        // exact fragment rectangle while keeping every primitive in its cell.
+        let origin = target.origin();
+        let min = [min[0] + origin[0], min[1] + origin[1]];
+        let max = [max[0] + origin[0], max[1] + origin[1]];
         self.begin(target, d.size)?;
         let mut s = self.0.state.borrow_mut();
         let r = s.recording.as_mut().expect("active scene");

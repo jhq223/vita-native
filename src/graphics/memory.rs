@@ -155,6 +155,8 @@ impl Drop for Block {
 }
 enum Storage {
     Arena(Rc<Block>),
+    // Read-only strided views retain the parent allocation, not another arena span.
+    Alias(Allocation),
     #[cfg(feature = "video")]
     Video(Rc<super::video::Import>),
 }
@@ -166,6 +168,7 @@ impl Drop for AllocationInner {
     fn drop(&mut self) {
         match &self.storage {
             Storage::Arena(block) => block.free.borrow_mut().release(self.range.clone()),
+            Storage::Alias(_) => {}
             #[cfg(feature = "video")]
             Storage::Video(_) => {}
         }
@@ -177,6 +180,7 @@ impl Allocation {
     pub fn ptr(&self) -> *mut c_void {
         let base = match &self.0.storage {
             Storage::Arena(block) => block.base as usize,
+            Storage::Alias(parent) => parent.ptr() as usize,
             #[cfg(feature = "video")]
             Storage::Video(import) => import.pointer(),
         };
@@ -184,6 +188,15 @@ impl Allocation {
     }
     pub fn writable(&self) -> bool {
         matches!(self.0.storage, Storage::Arena(_))
+    }
+    pub(super) fn alias(&self, range: Range<usize>) -> Result<Self> {
+        if range.is_empty() || range.end > self.len() {
+            return Err(super::Error::Invalid("allocation alias range"));
+        }
+        Ok(Self(Rc::new(AllocationInner {
+            storage: Storage::Alias(self.clone()),
+            range,
+        })))
     }
     #[cfg(feature = "video")]
     pub fn video(import: Rc<super::video::Import>, range: Range<usize>) -> Self {
@@ -195,6 +208,7 @@ impl Allocation {
     pub fn memory(&self) -> super::TextureMemory {
         match &self.0.storage {
             Storage::Arena(block) if block.kind == Kind::Cdram => super::TextureMemory::Cdram,
+            Storage::Alias(parent) => parent.memory(),
             _ => super::TextureMemory::Main,
         }
     }

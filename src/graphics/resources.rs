@@ -19,6 +19,7 @@ pub(super) struct TextureInner {
     pub strided: bool,
     pub storage: TargetStorage,
     pub mip_count: u32,
+    pub macrocell: Option<super::macrotile::Cell>,
     pub owner: Rc<Core>,
 }
 /// Sampled texture whose native storage survives every submitted reader.
@@ -57,9 +58,13 @@ impl Texture {
     pub fn target_storage(&self) -> Option<TargetStorage> {
         self.0.strided.then_some(self.0.storage)
     }
-    /// Live payload bytes; native slab capacity is reported separately.
+    /// Retained color allocation bytes; native slab capacity is reported separately.
+    /// Each macrotile alias reports the complete shared atlas allocation.
     pub fn allocated_bytes(&self) -> usize {
-        self.0.allocation.len()
+        self.0.macrocell.map_or(self.0.allocation.len(), |cell| {
+            let size = cell.layout.size();
+            size[0] as usize * size[1] as usize * 4
+        })
     }
 }
 pub(super) struct FramebufferInner {
@@ -77,6 +82,18 @@ pub(super) struct FramebufferInner {
 #[derive(Clone)]
 pub struct Framebuffer(pub(super) Rc<FramebufferInner>);
 impl Framebuffer {
+    pub(super) fn macrocell(&self) -> Option<super::macrotile::Cell> {
+        self.0.texture.0.macrocell
+    }
+    pub(super) fn origin(&self) -> [u32; 2] {
+        self.macrocell().map_or([0, 0], |cell| {
+            let rect = cell
+                .layout
+                .cell_rect(cell.index)
+                .expect("admitted macrotile cell");
+            [rect[0], rect[1]]
+        })
+    }
     /// Physical texture/target extent in pixels.
     pub fn size(&self) -> [u32; 2] {
         self.0.texture.size()
@@ -266,6 +283,7 @@ impl Context {
             strided,
             storage,
             mip_count,
+            macrocell: None,
             owner: self.0.core.clone(),
         })))
     }
@@ -656,6 +674,9 @@ impl Context {
         encoding: SurfaceEncoding,
     ) -> Result<Framebuffer> {
         self.same(&t.0.owner)?;
+        if t.0.macrocell.is_some() {
+            return Err(Error::Invalid("use the owning macrotile cell framebuffer"));
+        }
         if encoding == SurfaceEncoding::Srgb
             && !matches!(t.format(), TextureFormat::Rgba8 | TextureFormat::Bgra8)
         {

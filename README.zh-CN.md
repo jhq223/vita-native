@@ -117,6 +117,11 @@ alpha 保持线性。读回和采样视图返回存储字节；默认表面直�
 渲染目标与扫描输出使用 CDRAM；应用按容量和带宽需求安排源图片。`MemoryUsage` 分别记录各物理池；
 CDRAM 准入包含扫描输出和所有像素块，SDK 参数缓冲在初始化该物理域前扣除。
 
+`Context::create_macrotile_target` 为同一场景中的有序后处理创建线性 RGBA8 图集。
+应用选择 `MacrotileLayout` 和各单元的逻辑尺寸，通过 `macrotile_target_footprint` 查询完整占用。
+每个单元提供帧缓冲及只读 CLAMP 纹理别名；绘制保留各阶段的 RGBA8 写回，平移视口与裁剪，
+同场景采样只读取前置单元。各单元与在途读者共同保留图集所有者。
+
 `Context::copy_texture` 通过 PTLA 在独立的 RGBA8 渲染目标间复制布局兼容的无缩放子矩形。
 片元/传输依赖及最后完成通知保留两端分配；其他格式由应用沿用绘制路径。
 

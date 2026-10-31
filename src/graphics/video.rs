@@ -125,6 +125,7 @@ impl Context {
                 strided: false,
                 storage: super::TargetStorage::Linear,
                 mip_count: 1,
+                macrocell: None,
                 owner: self.0.core.clone(),
             })));
         }

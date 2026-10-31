@@ -115,6 +115,13 @@ Render targets and scanout use CDRAM; applications choose sampled-image placemen
 and bandwidth. `MemoryUsage` reports each physical arena separately. CDRAM admission includes scanout and all mapped pixel blocks; the SDK parameter
 buffer is deducted before this shared domain is initialized.
 
+`Context::create_macrotile_target` allocates a linear RGBA8 atlas for ordered
+post-processing in one scene. Applications choose `MacrotileLayout` and logical
+cell sizes, and query the complete allocation with `macrotile_target_footprint`.
+Each cell exposes a framebuffer and a read-only CLAMP texture alias. Draws retain
+RGBA8 stores between stages, translate viewport/scissors, and accept feedback
+only from earlier cells. Cells and submitted readers share the atlas owner.
+
 Textures and buffers own mapped allocations. Scene submissions retain their inputs
 until fragment completion, and display scanout retains its output independently.
 Bound programs remain owned until replaced or unbound. Presentation uses three

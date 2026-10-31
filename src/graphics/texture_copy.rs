@@ -169,7 +169,9 @@ impl Plan {
         size: [u32; 2],
     ) -> Result<Self> {
         if [source, destination].into_iter().any(|texture| {
-            texture.format() != super::TextureFormat::Rgba8 || texture.target_storage().is_none()
+            texture.format() != super::TextureFormat::Rgba8
+                || texture.target_storage().is_none()
+                || texture.0.macrocell.is_some()
         }) {
             return Err(Error::Unsupported(
                 "texture copy requires RGBA8 render targets",

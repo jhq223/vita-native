@@ -21,6 +21,7 @@ mod gxp;
 mod layout;
 #[cfg(any(target_os = "vita", test))]
 mod leases;
+mod macrotile;
 #[cfg(any(target_os = "vita", test))]
 mod pressure;
 #[cfg(any(target_os = "vita", test))]
@@ -43,6 +44,9 @@ pub use layout::{
     MipLayout, TargetFootprint, TargetLayout, TargetStorage, TextureLayout, mip_layout,
     mip_texture_layout, target_layout, texture_layout,
 };
+pub use macrotile::MacrotileLayout;
+#[cfg(target_os = "vita")]
+pub use macrotile::MacrotileTarget;
 pub use types::*;
 #[cfg(target_os = "vita")]
 mod commands;
