@@ -405,8 +405,11 @@ pub struct ClearProgram<'a> {
     pub position_attribute: &'a str,
     /// Name of the fragment float4 clear-color uniform.
     pub color_uniform: &'a str,
-    /// Name of the fragment float4 half-open pixel clip uniform.
-    pub clip_uniform: &'a str,
+    /// Optional fragment float4 half-open pixel clip uniform.
+    /// Clears cover the entire physical surface, whose bounds GXM enforces.
+    /// Use `None` for an unclipped clear shader, avoiding fragment discard.
+    /// Use `Some(name)` when reusing a shader that expects clip bounds.
+    pub clip_uniform: Option<&'a str>,
 }
 
 /// How a fragment program produces the final color-surface value.

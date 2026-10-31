@@ -60,7 +60,7 @@ impl Context {
                     offset: 0,
                 }],
                 instance: None,
-                clip_uniform: Some(clear.clip_uniform),
+                clip_uniform: clear.clip_uniform,
             })
         };
         let programs = [
