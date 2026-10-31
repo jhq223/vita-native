@@ -1,4 +1,4 @@
-//! Immediate context bindings. Only region clipping resets at scene begin.
+//! Immediate context bindings. Scene begin resets viewport and region clipping.
 use super::TextureFilter;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -17,6 +17,7 @@ pub(super) struct Bindings {
 
 impl Bindings {
     pub fn begin_scene(&mut self) {
+        self.viewport = None;
         self.clip = None;
     }
 
@@ -54,7 +55,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scene_switch_preserves_streams_and_textures_but_resets_clip() {
+    fn scene_switch_preserves_streams_and_textures_but_resets_viewport_and_clip() {
         let mut state = Bindings::default();
         let mut calls = [0; 4];
         for _ in 0..32 {
@@ -66,7 +67,7 @@ mod tests {
                 calls[3] += usize::from(state.texture(0, [1, 2, 3, 4], TextureFilter::Linear));
             }
         }
-        assert_eq!(calls, [1, 32, 1, 1]);
+        assert_eq!(calls, [32, 32, 1, 1]);
         assert!(state.viewport([0, 0], [480, 272]));
         assert!(state.viewport([128, 0], [480, 272]));
         assert!(!state.viewport([128, 0], [480, 272]));
