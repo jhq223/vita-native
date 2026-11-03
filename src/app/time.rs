@@ -2,6 +2,17 @@
 use super::{Error, sdk};
 use std::{prelude::v1::*, time::Duration};
 
+#[cfg(feature = "profiling")]
+pub use crate::thread_runtime::ThreadRuntime;
+
+/// Read the caller's raw kernel execution counter and current scheduling state.
+/// The counter excludes descheduled time; its publication cadence is defined by
+/// the kernel. Validate that cadence before using differences for short scopes.
+#[cfg(feature = "profiling")]
+pub fn thread_runtime() -> Result<ThreadRuntime, Error> {
+    crate::thread_runtime::read().map_err(|(operation, code)| Error { operation, code })
+}
+
 /// Monotonic microseconds; this clock remains distinct from the story clock.
 pub fn monotonic_micros() -> u64 {
     // SAFETY: scalar kernel query.

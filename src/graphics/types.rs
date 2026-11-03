@@ -147,6 +147,10 @@ pub struct Config {
     pub patcher_fragment_usse_bytes: u32,
     /// Queued scenes per shared scheduling target: 1..=8, default 4.
     pub scenes_per_frame: u16,
+    /// Offscreen RGBA8 addressing; default linear. Tiled requests use complete
+    /// 32x32 storage tiles when both dimensions are at least 32; smaller targets,
+    /// Coverage8 and display scanout retain linear storage.
+    pub target_storage: super::TargetStorage,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -166,6 +170,7 @@ impl Default for Config {
             patcher_vertex_usse_bytes: 256 * 1024,
             patcher_fragment_usse_bytes: 512 * 1024,
             scenes_per_frame: 4,
+            target_storage: super::TargetStorage::Linear,
         }
     }
 }
@@ -400,8 +405,11 @@ pub struct ClearProgram<'a> {
     pub position_attribute: &'a str,
     /// Name of the fragment float4 clear-color uniform.
     pub color_uniform: &'a str,
-    /// Name of the fragment float4 half-open pixel clip uniform.
-    pub clip_uniform: &'a str,
+    /// Optional fragment float4 half-open pixel clip uniform.
+    /// Clears cover the entire physical surface, whose bounds GXM enforces.
+    /// Use `None` for an unclipped clear shader, avoiding fragment discard.
+    /// Use `Some(name)` when reusing a shader that expects clip bounds.
+    pub clip_uniform: Option<&'a str>,
 }
 
 /// How a fragment program produces the final color-surface value.

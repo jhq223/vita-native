@@ -60,7 +60,7 @@ impl Context {
                     offset: 0,
                 }],
                 instance: None,
-                clip_uniform: Some(clear.clip_uniform),
+                clip_uniform: clear.clip_uniform,
             })
         };
         let programs = [
@@ -103,14 +103,24 @@ impl Context {
     }
     fn begin(&self, target: Framebuffer, size: [u32; 2]) -> Result<()> {
         let mut s = self.0.state.borrow_mut();
-        if let Some(recording) = &mut s.recording
-            && Rc::ptr_eq(&recording.target.0, &target.0)
-        {
-            if recording.size != size {
-                self.viewport(size);
+        if let Some(recording) = &mut s.recording {
+            let same_macrotile = match (recording.target.macrocell(), target.macrocell()) {
+                (Some(previous), Some(next)) => next.follows(previous)?,
+                _ => false,
+            };
+            if Rc::ptr_eq(&recording.target.0, &target.0) || same_macrotile {
+                self.viewport(target.origin(), size);
                 recording.size = size;
+                if same_macrotile {
+                    Self::retain(
+                        recording,
+                        Lease::Allocation(target.0.texture.0.allocation.clone()),
+                    );
+                    Self::retain(recording, Lease::Target(target.clone()));
+                    recording.target = target;
+                }
+                return Ok(());
             }
-            return Ok(());
         }
         self.end_scene(&mut s)?;
         let (slot, n) = self.reserve_slot(&mut s)?;
@@ -123,7 +133,11 @@ impl Context {
                 self.0.core.native.context,
                 SCE_GXM_SCENE_FRAGMENT_TRANSFER_SYNC,
                 target.0.target.raw,
-                &region,
+                if target.macrocell().is_some() {
+                    core::ptr::null()
+                } else {
+                    &region
+                },
                 core::ptr::null_mut(),
                 // Fragment scenes execute in order; transfer flags above establish
                 // transfer dependencies. This object only gates display queue access.
@@ -133,6 +147,7 @@ impl Context {
             )
         });
         let allocation = target.0.texture.0.allocation.clone();
+        let origin = target.origin();
         s.recording = Some(Recording {
             target: target.clone(),
             leases: std::vec![Lease::Allocation(allocation), Lease::Target(target)],
@@ -144,11 +159,11 @@ impl Context {
         });
         self.command("sceGxmBeginScene", code)?;
         self.0.bindings.borrow_mut().begin_scene();
-        self.viewport(size);
+        self.viewport(origin, size);
         Ok(())
     }
-    fn viewport(&self, size: [u32; 2]) {
-        if !self.0.bindings.borrow_mut().viewport(size) {
+    fn viewport(&self, origin: [u32; 2], size: [u32; 2]) {
+        if !self.0.bindings.borrow_mut().viewport(origin, size) {
             return;
         }
         // SAFETY: recording owns a live immediate context. Viewport changes are
@@ -157,9 +172,9 @@ impl Context {
             let c = self.0.core.native.context;
             sceGxmSetViewport(
                 c,
+                origin[0] as f32 + size[0] as f32 * 0.5,
                 size[0] as f32 * 0.5,
-                size[0] as f32 * 0.5,
-                size[1] as f32 * 0.5,
+                origin[1] as f32 + size[1] as f32 * 0.5,
                 -(size[1] as f32) * 0.5,
                 0.5,
                 0.5,
@@ -167,10 +182,13 @@ impl Context {
         }
     }
     /// Clear the entire physical target through the prepared production GXP program.
+    /// A macrotile cell includes its padding beyond the logical sampled view.
     pub fn clear(&self, target: Target<'_>, color: [f32; 4]) -> Result<()> {
         let size = match target {
             Target::Screen => self.output_size(),
-            Target::Framebuffer(f) => f.size(),
+            Target::Framebuffer(f) => f
+                .macrocell()
+                .map_or_else(|| f.size(), |cell| cell.layout.cell_size()),
         };
         let encoding = self.target(target)?.encoding();
         let index = usize::from(encoding == SurfaceEncoding::Srgb);
@@ -178,19 +196,23 @@ impl Context {
         let clear = clear
             .as_ref()
             .ok_or(Error::Invalid("clear program initialization"))?;
-        self.draw(Draw {
-            target,
-            size,
-            program: &clear.programs[index],
-            vertices: &clear.vertices,
-            instances: None,
-            indices: None,
-            range: 0..3,
-            textures: &[],
-            uniforms: &[UniformValue::Vec4(&clear.colors[index], color)],
-            blend: Blend::Replace,
-            scissor: None,
-        })
+        self.draw_filtered_impl(
+            Draw {
+                target,
+                size,
+                program: &clear.programs[index],
+                vertices: &clear.vertices,
+                instances: None,
+                indices: None,
+                range: 0..3,
+                textures: &[],
+                uniforms: &[UniformValue::Vec4(&clear.colors[index], color)],
+                blend: Blend::Replace,
+                scissor: None,
+            },
+            TextureFilter::Linear,
+            true,
+        )
     }
     /// Submit a direct draw with linear minification and magnification.
     pub fn draw(&self, draw: Draw<'_>) -> Result<()> {
@@ -198,6 +220,14 @@ impl Context {
     }
     /// Submit one indexed hardware draw, retaining its exact owners through fragment completion.
     pub fn draw_filtered(&self, d: Draw<'_>, filter: TextureFilter) -> Result<()> {
+        self.draw_filtered_impl(d, filter, false)
+    }
+    fn draw_filtered_impl(
+        &self,
+        d: Draw<'_>,
+        filter: TextureFilter,
+        full_clear: bool,
+    ) -> Result<()> {
         self.same(&d.program.0.owner)?;
         if d.program.0.output == FragmentOutput::Declared && d.blend != Blend::Replace {
             return Err(Error::Invalid("declared fragment output owns blending"));
@@ -244,7 +274,14 @@ impl Context {
                 "fragment output and surface encoding mismatch",
             ));
         }
-        if (0..2).any(|i| d.size[i] > target.size()[i]) {
+        let bounds = if full_clear {
+            target
+                .macrocell()
+                .map_or_else(|| target.size(), |cell| cell.layout.cell_size())
+        } else {
+            target.size()
+        };
+        if (0..2).any(|i| d.size[i] > bounds[i]) {
             return Err(Error::Invalid("logical viewport exceeds target"));
         }
         let scissor = d.scissor.unwrap_or([0, 0, d.size[0], d.size[1]]);
@@ -260,14 +297,20 @@ impl Context {
         {
             return Ok(());
         }
-        if d.program.0.clip.is_none() && super::types::needs_fragment_clip(min, max, target.size())
-        {
+        if d.program.0.clip.is_none() && super::types::needs_fragment_clip(min, max, bounds) {
             return Err(Error::Unsupported("pixel scissor requires a clip uniform"));
         }
         for t in d.textures {
             self.same(&t.0.owner)?;
             if Rc::ptr_eq(&t.0, &target.0.texture.0) {
                 return Err(Error::Invalid("same scene texture feedback"));
+            }
+            if let (Some(source), Some(destination)) = (t.0.macrocell, target.macrocell())
+                && !destination.reads(source)
+            {
+                return Err(Error::Invalid(
+                    "macrotile feedback requires an earlier cell",
+                ));
             }
         }
         for u in d.uniforms {
@@ -298,6 +341,11 @@ impl Context {
             }
             (identity.as_ref().expect("identity indices").clone(), 4)
         };
+        // A cell-aligned origin preserves the existing logical viewport and
+        // exact fragment rectangle while keeping every primitive in its cell.
+        let origin = target.origin();
+        let min = [min[0] + origin[0], min[1] + origin[1]];
+        let max = [max[0] + origin[0], max[1] + origin[1]];
         self.begin(target, d.size)?;
         let mut s = self.0.state.borrow_mut();
         let r = s.recording.as_mut().expect("active scene");

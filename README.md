@@ -8,7 +8,7 @@ Native calls use `vitasdk-sys = 0.3.3` and the VitaSDK import libraries.
 | Feature | Interface |
 | --- | --- |
 | `graphics` | GXM contexts, offline GXP programs, textures, buffers, commands, completion and presentation |
-| `app` | Application identity, controller/touch input, IME, power callbacks, IO and memory |
+| `app` | Application identity, controller/touch input, IME, power configuration/callbacks, IO and memory |
 | `process-allocator` | One growing C/newlib/Rust process heap backed by independent system mspaces |
 | `audio` | Fixed-buffer AudioOut playback with explicit pause and drain |
 | `video` | AvPlayer decoding from a seekable stream into caller-owned video and PCM buffers |
@@ -84,7 +84,9 @@ MAIN commitment also competes with CPU arenas in the process ledger.
 The application supplies offline GXP code, vertex layouts and reflected binding
 names through `ProgramDescriptor`. Programs may declare a float4 clipping uniform
 to support exact pixel scissors. `ClearProgram` describes the application's clear
-programs and binding names. Programs are prepared once and reused by draws.
+programs and binding names. Clears cover the full physical surface; their optional
+clip uniform can be `None` for a shader without fragment discard. Programs are
+prepared once and reused by draws.
 `FragmentOutput::Declared` accepts `__nativecolor` programs that own blending and
 the output register format; their draws use replacement mode.
 `Config::display_encoding` and `Context::framebuffer_encoded` can select sRGB
@@ -99,11 +101,26 @@ indices wrap once per instance in original order. Each draw accepts at most
 fragment completion. Ordinary draws use one indexed stream.
 
 Textures select CDRAM or uncached MAIN through `TextureMemory`. Render targets
-select RGBA8 or single-channel alpha coverage through `TargetFormat`; their strided
-layout, color surface and sampling view share the same format-specific pitch.
+select RGBA8 or single-channel alpha coverage through `TargetFormat`.
+`Config::target_storage` selects linear storage (default) or 32×32 tiled RGBA8
+storage. Small surfaces, Coverage8 and scanout stay linear.
+`Context::create_target_texture_with_storage` overrides the default for one
+allocation, using the exact footprint from `TargetStorage::layout`.
+Allocation, color surface, sampler and CPU row conversion use the reported actual layout. Tiled
+uploads wait for their own users. `Context::supports_texture_copy` admits linear
+rectangles and aligned tiled rectangles; applications use their drawing path for
+other layout/rectangle combinations. Tiled PTLA commands rebase complete tile-row
+strips with zero native origins and matching command strides.
 Render targets and scanout use CDRAM; applications choose sampled-image placement to balance capacity
 and bandwidth. `MemoryUsage` reports each physical arena separately. CDRAM admission includes scanout and all mapped pixel blocks; the SDK parameter
 buffer is deducted before this shared domain is initialized.
+
+`Context::create_macrotile_target` allocates a linear RGBA8 atlas for ordered
+post-processing in one scene. Applications choose `MacrotileLayout` and logical
+cell sizes, and query the complete allocation with `macrotile_target_footprint`.
+Each cell exposes a framebuffer and a read-only CLAMP texture alias. Draws retain
+RGBA8 stores between stages, translate viewport/scissors, and accept feedback
+only from earlier cells. Cells and submitted readers share the atlas owner.
 
 Textures and buffers own mapped allocations. Scene submissions retain their inputs
 until fragment completion, and display scanout retains its output independently.
@@ -139,8 +156,8 @@ work keeps its resources until completion. When kernel allocation reports exhaus
 physical pages, the device releases idle caches in that physical domain and retries
 once if storage was released. Retained blocks remain charged to their physical domain.
 
-`Context::copy_texture` copies unscaled RGBA8 rectangles between independent
-strided render targets using PTLA. Fragment/transfer dependencies and the final
+`Context::copy_texture` copies compatible unscaled RGBA8 rectangles between independent
+render targets using PTLA. Fragment/transfer dependencies and the final
 notification retain both allocations. Applications keep drawing paths for other formats.
 
 ## Ownership and threads

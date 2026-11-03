@@ -1,6 +1,119 @@
-//! Native power notifications retained in order until the owner drains them.
+//! Native power configuration and ordered notifications.
 use super::{Error, sdk, time, wake::Wake};
-use std::{cell::UnsafeCell, marker::PhantomData, prelude::v1::*, rc::Rc, sync::Arc};
+use std::{
+    cell::UnsafeCell,
+    marker::PhantomData,
+    prelude::v1::*,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
+
+static CONFIGURATION: Mutex<()> = Mutex::new(());
+
+/// Sony power configurations, expressed without a fixed GPU frequency in MHz.
+///
+/// The Power Service Overview, "Power Configuration Control", defines these
+/// modes. Applications choose a mode explicitly and may observe the resulting
+/// clocks through `clock_frequencies` when `profiling` is enabled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigurationMode {
+    /// Normal GPU clock with WLAN/COM available; the process startup mode.
+    A,
+    /// High GPU clock with WLAN/COM unavailable.
+    B,
+    /// High GPU clock with WLAN/COM available. Screen brightness is limited
+    /// and the camera is unavailable. PlayStation TV has no brightness limit.
+    C,
+}
+
+/// Request a Sony power configuration through `scePowerSetConfigurationMode`.
+///
+/// Calls through this function are serialized because the SDK operation is not
+/// multithread safe. Call during application setup or another explicit host
+/// transition; execution time varies by device. The SDK returns zero on success
+/// and a negative error code on failure, retained in [`Error`].
+///
+/// The selected mode controls the GPU clock and the services documented by
+/// [`ConfigurationMode`]. Sony does not specify a GPU frequency in MHz. Callers
+/// measuring a configuration change should observe all clocks before and after
+/// the request and record the request result with those observations.
+pub fn request_configuration(mode: ConfigurationMode) -> Result<(), Error> {
+    // This lock contains no data; recovering a poisoned guard still serializes
+    // the native call without asserting that an earlier request succeeded.
+    let _guard = CONFIGURATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let conf = match mode {
+        ConfigurationMode::A => sdk::SCE_POWER_CONFIGURATION_MODE_A,
+        ConfigurationMode::B => sdk::SCE_POWER_CONFIGURATION_MODE_B,
+        ConfigurationMode::C => sdk::SCE_POWER_CONFIGURATION_MODE_C,
+    };
+    // SAFETY: the enum supplies a documented mode and the lock serializes calls
+    // to the SDK operation. No pointer or borrowed storage crosses the boundary.
+    Error::check("scePowerSetConfigurationMode", unsafe {
+        sdk::scePowerSetConfigurationMode(conf as i32)
+    })
+    .map(|_| ())
+}
+
+/// Request the ARM CPU clock frequency in MHz through VitaSDK's power API.
+///
+/// Firmware validates supported frequencies; failures retain the native error
+/// code. Requests are serialized with power configuration changes. A system
+/// power plugin may override the request, so profiling callers should observe
+/// the resulting frequency with `clock_frequencies`.
+pub fn request_arm_clock_frequency(megahertz: i32) -> Result<(), Error> {
+    let _guard = CONFIGURATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: this scalar request has no pointers or retained ownership. The
+    // firmware validates the frequency and calls through this API are serialized.
+    Error::check("scePowerSetArmClockFrequency", unsafe {
+        sdk::scePowerSetArmClockFrequency(megahertz)
+    })
+    .map(|_| ())
+}
+
+/// Read-only clock observations. Each failed query retains its native error.
+#[cfg(feature = "profiling")]
+pub struct ClockFrequencies {
+    /// Reported ARM clock in MHz.
+    pub arm_mhz: Result<u32, Error>,
+    /// Reported GPU clock in MHz.
+    pub gpu_mhz: Result<u32, Error>,
+    /// Reported bus clock in MHz.
+    pub bus_mhz: Result<u32, Error>,
+    /// Reported GPU crossbar clock in MHz.
+    pub gpu_xbar_mhz: Result<u32, Error>,
+}
+
+/// Read the current hardware clock frequencies.
+/// Units follow VitaSDK's psp2/power.h query contract.
+#[cfg(feature = "profiling")]
+pub fn clock_frequencies() -> ClockFrequencies {
+    let read = |operation, value| Error::check(operation, value).map(|value| value as u32);
+    // SAFETY: scalar ScePower queries, with no pointers or retained ownership.
+    unsafe {
+        ClockFrequencies {
+            arm_mhz: read(
+                "scePowerGetArmClockFrequency",
+                sdk::scePowerGetArmClockFrequency(),
+            ),
+            gpu_mhz: read(
+                "scePowerGetGpuClockFrequency",
+                sdk::scePowerGetGpuClockFrequency(),
+            ),
+            bus_mhz: read(
+                "scePowerGetBusClockFrequency",
+                sdk::scePowerGetBusClockFrequency(),
+            ),
+            gpu_xbar_mhz: read(
+                "scePowerGetGpuXbarClockFrequency",
+                sdk::scePowerGetGpuXbarClockFrequency(),
+            ),
+        }
+    }
+}
 
 /// An actual application power transition reported by the SDK.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

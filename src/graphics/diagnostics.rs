@@ -1,16 +1,18 @@
 //! Profiling observations; none of these values control submission or ownership.
 
-/// CPU execution sampled from the calling thread around EndScene.
+/// Raw kernel execution-counter differences paired around EndScene.
 /// All fields are zero without `profiling`. Sony defines `runClocks` in microseconds.
 /// One pair is sampled at most every 100 ms; unsampled calls remain in the SDK wall counters.
+/// Kernel publication may lag execution, so short-scope differences are not
+/// exact per-call CPU times and may be zero or exceed their paired wall time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ThreadRunTiming {
     /// Successful, monotonic pairs of thread queries.
     pub samples: u64,
     /// Wall microseconds covering both queries and the enclosed SDK call.
     pub wall_us: u64,
-    /// Calling-thread execution microseconds between the two kernel samples.
-    /// Includes query-boundary overhead; this is neither GPU time nor pure SDK CPU time.
+    /// Raw execution-counter difference in microseconds between kernel samples.
+    /// Includes publication-boundary effects; retain the sampling qualification above.
     pub run_us: u64,
     /// Thread-information queries, including unsuccessful queries.
     pub query_calls: u64,

@@ -752,7 +752,10 @@ impl Context {
         let probe = self.0.timing.start_scene_end(
             n.value,
             target_id,
-            r.target.size().map(|n| n.max(128).next_power_of_two()),
+            r.target.macrocell().map_or_else(
+                || r.target.size().map(|n| n.max(128).next_power_of_two()),
+                |cell| cell.layout.size(),
+            ),
             r.work,
             super::completion::pending(&s.flights, target_id, super::timing::clock_us()),
         );
