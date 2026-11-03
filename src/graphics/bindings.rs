@@ -1,5 +1,5 @@
 //! Immediate context bindings. Scene begin resets viewport and region clipping.
-use super::TextureFilter;
+use super::{RasterState, TextureFilter};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SampledTexture {
@@ -13,12 +13,18 @@ pub(super) struct Bindings {
     clip: Option<[u32; 4]>,
     vertices: [Option<usize>; 2],
     textures: [Option<SampledTexture>; 16],
+    raster: Option<RasterState>,
 }
 
 impl Bindings {
     pub fn begin_scene(&mut self) {
         self.viewport = None;
         self.clip = None;
+        self.raster = None;
+    }
+
+    pub fn raster(&mut self, state: RasterState) -> bool {
+        replace(&mut self.raster, state)
     }
 
     pub fn viewport(&mut self, origin: [u32; 2], size: [u32; 2]) -> bool {
@@ -53,6 +59,25 @@ fn replace<T: Copy + Eq>(current: &mut Option<T>, value: T) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_draws_reuse_raster_state_and_clear_restores_defaults() {
+        let mut bindings = Bindings::default();
+        let ordinary = RasterState::default();
+        let depth = RasterState {
+            depth_write: true,
+            ..ordinary
+        };
+        assert!(bindings.raster(ordinary));
+        for _ in 0..256 {
+            assert!(!bindings.raster(ordinary));
+        }
+        assert!(bindings.raster(depth));
+        assert!(!bindings.raster(depth));
+        assert!(bindings.raster(ordinary));
+        bindings.begin_scene();
+        assert!(bindings.raster(ordinary));
+    }
 
     #[test]
     fn scene_switch_preserves_streams_and_textures_but_resets_viewport_and_clip() {

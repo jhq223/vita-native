@@ -81,6 +81,21 @@ MAIN commitment also competes with CPU arenas in the process ledger.
 
 ## Graphics
 
+`Context::depth_stencil` creates owned, tile-padded DF32/S8 planes, initialized
+with the supplied depth and stencil values. `framebuffer_with_depth_stencil`
+attaches them to a same-sized color target. Submitted scenes retain both planes
+until completion and load/store them across scene boundaries.
+`clear_depth_stencil` waits for users before updating selected planes.
+
+`draw_with_state` accepts a complete `RasterState` with culling, depth comparison
+and writes, and independent front/back stencil operations and masks. State changes
+apply all fields, while consecutive identical states reuse the context bindings.
+Ordinary draws restore the two-dimensional defaults.
+Depth or stencil use without an attachment returns an error.
+`create_program_variants` prepares explicit `Blend::Custom` variants, including
+independent RGB/alpha equations and RGBA write masks. Draws require a prepared
+variant; shader generation and constant-color blend emulation belong to callers.
+
 The application supplies offline GXP code, vertex layouts and reflected binding
 names through `ProgramDescriptor`. Programs may declare a float4 clipping uniform
 to support exact pixel scissors. `ClearProgram` describes the application's clear

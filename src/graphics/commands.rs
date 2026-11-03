@@ -19,7 +19,10 @@ pub struct DrawInstances<'a> {
 pub struct Draw<'a> {
     /// Physical output or the current process scanout buffer.
     pub target: Target<'a>,
-    /// Logical viewport extent, bounded by physical storage.
+    /// Raster viewport extent in pixels (1..=4096 on each axis).
+    /// Ordinary targets permit a viewport larger than their physical storage;
+    /// scissor coverage is intersected with both extents. Macrotile draws retain
+    /// their cell's logical extent as the viewport limit.
     pub size: [u32; 2],
     /// Prepared GXP variants and reflected interface.
     pub program: &'a Program,
@@ -108,7 +111,9 @@ impl Context {
                 (Some(previous), Some(next)) => next.follows(previous)?,
                 _ => false,
             };
-            if Rc::ptr_eq(&recording.target.0, &target.0) || same_macrotile {
+            if (Rc::ptr_eq(&recording.target.0, &target.0) && recording.target.1 == target.1)
+                || same_macrotile
+            {
                 self.viewport(target.origin(), size);
                 recording.size = size;
                 if same_macrotile {
@@ -124,9 +129,12 @@ impl Context {
         }
         self.end_scene(&mut s)?;
         let (slot, n) = self.reserve_slot(&mut s)?;
+        let end = target
+            .1
+            .map_or_else(|| target.size(), |region| region.end());
         let region = SceGxmValidRegion {
-            xMax: target.size()[0] - 1,
-            yMax: target.size()[1] - 1,
+            xMax: end[0] - 1,
+            yMax: end[1] - 1,
         };
         let code = self.0.timing.measure(Call::SceneBegin, || unsafe {
             sceGxmBeginScene(
@@ -143,14 +151,23 @@ impl Context {
                 // transfer dependencies. This object only gates display queue access.
                 target.0.sync.raw(),
                 &target.0.surface,
-                core::ptr::null(),
+                target
+                    .0
+                    .depth_stencil
+                    .as_ref()
+                    .map_or(core::ptr::null(), |d| &d.0.surface),
             )
         });
         let allocation = target.0.texture.0.allocation.clone();
         let origin = target.origin();
+        let mut leases = std::vec![Lease::Allocation(allocation), Lease::Target(target.clone())];
+        if let Some(depth) = &target.0.depth_stencil {
+            leases.push(Lease::Allocation(depth.0.depth.clone()));
+            leases.push(Lease::Allocation(depth.0.stencil.clone()));
+        }
         s.recording = Some(Recording {
             target: target.clone(),
-            leases: std::vec![Lease::Allocation(allocation), Lease::Target(target)],
+            leases,
             slot,
             notification: n.value,
             size,
@@ -181,7 +198,8 @@ impl Context {
             );
         }
     }
-    /// Clear the entire physical target through the prepared production GXP program.
+    /// Clear this use's write region through the prepared production GXP program.
+    /// Ordinary framebuffers without a write region cover their physical target.
     /// A macrotile cell includes its padding beyond the logical sampled view.
     pub fn clear(&self, target: Target<'_>, color: [f32; 4]) -> Result<()> {
         let size = match target {
@@ -212,6 +230,7 @@ impl Context {
             },
             TextureFilter::Linear,
             true,
+            RasterState::default(),
         )
     }
     /// Submit a direct draw with linear minification and magnification.
@@ -220,13 +239,24 @@ impl Context {
     }
     /// Submit one indexed hardware draw, retaining its exact owners through fragment completion.
     pub fn draw_filtered(&self, d: Draw<'_>, filter: TextureFilter) -> Result<()> {
-        self.draw_filtered_impl(d, filter, false)
+        self.draw_with_state(d, filter, RasterState::default())
+    }
+    /// Submit with explicit raster/depth/stencil state. Depth or stencil access
+    /// requires a framebuffer attachment. Changed state is applied in full.
+    pub fn draw_with_state(
+        &self,
+        d: Draw<'_>,
+        filter: TextureFilter,
+        state: RasterState,
+    ) -> Result<()> {
+        self.draw_filtered_impl(d, filter, false, state)
     }
     fn draw_filtered_impl(
         &self,
         d: Draw<'_>,
         filter: TextureFilter,
         full_clear: bool,
+        state: RasterState,
     ) -> Result<()> {
         self.same(&d.program.0.owner)?;
         if d.program.0.output == FragmentOutput::Declared && d.blend != Blend::Replace {
@@ -257,8 +287,7 @@ impl Context {
             }
             _ => return Err(Error::Invalid("draw instance stream")),
         };
-        if d.size.contains(&0)
-            || d.range.start > d.range.end
+        if d.range.start > d.range.end
             || d.textures.len() > 16
             || d.textures.len() < d.program.0.texture_slots
             || d.program.0.stride != d.vertices.stride
@@ -267,6 +296,16 @@ impl Context {
             return Err(Error::Invalid("draw layout or range"));
         }
         let target = self.target(d.target)?;
+        if state.requires_depth_stencil() && target.0.depth_stencil.is_none() {
+            return Err(Error::Invalid("draw requires a depth/stencil attachment"));
+        }
+        let blend_index = d
+            .program
+            .0
+            .fragment
+            .iter()
+            .position(|(blend, _)| *blend == d.blend)
+            .ok_or(Error::Invalid("blend variant was not prepared"))?;
         if (target.encoding() == SurfaceEncoding::Srgb)
             != (d.program.0.output == FragmentOutput::Srgb)
         {
@@ -281,15 +320,11 @@ impl Context {
         } else {
             target.size()
         };
-        if (0..2).any(|i| d.size[i] > bounds[i]) {
-            return Err(Error::Invalid("logical viewport exceeds target"));
-        }
-        let scissor = d.scissor.unwrap_or([0, 0, d.size[0], d.size[1]]);
-        let min = [scissor[0].min(d.size[0]), scissor[1].min(d.size[1])];
-        let max = [
-            scissor[0].saturating_add(scissor[2]).min(d.size[0]),
-            scissor[1].saturating_add(scissor[3]).min(d.size[1]),
-        ];
+        let (min, max) =
+            super::types::draw_clip(d.size, bounds, d.scissor, target.macrocell().is_some())?;
+        let (min, max) = target
+            .1
+            .map_or((min, max), |region| region.intersect(min, max));
         if d.range.is_empty()
             || instance_draw.is_some_and(|draw| draw.count == 0)
             || min[0] >= max[0]
@@ -302,7 +337,7 @@ impl Context {
         }
         for t in d.textures {
             self.same(&t.0.owner)?;
-            if Rc::ptr_eq(&t.0, &target.0.texture.0) {
+            if t.0.allocation.id() == target.0.texture.0.allocation.id() {
                 return Err(Error::Invalid("same scene texture feedback"));
             }
             if let (Some(source), Some(destination)) = (t.0.macrocell, target.macrocell())
@@ -347,6 +382,7 @@ impl Context {
         let min = [min[0] + origin[0], min[1] + origin[1]];
         let max = [max[0] + origin[0], max[1] + origin[1]];
         self.begin(target, d.size)?;
+        super::pipeline_native::apply(self, state);
         let mut s = self.0.state.borrow_mut();
         let r = s.recording.as_mut().expect("active scene");
         Self::retain(r, Lease::Program(d.program.clone()));
@@ -359,10 +395,7 @@ impl Context {
             Self::retain(r, Lease::Allocation(t.0.allocation.clone()));
         }
         let c = self.0.core.native.context;
-        let variants = [
-            usize::from(index_width == 4),
-            usize::from(d.blend == Blend::Premultiplied),
-        ];
+        let variants = [usize::from(index_width == 4), blend_index];
         let mut bound = self.0.bound_program.borrow_mut();
         if bound
             .as_ref()
@@ -370,7 +403,7 @@ impl Context {
         {
             unsafe {
                 sceGxmSetVertexProgram(c, d.program.0.vertex[variants[0]]);
-                sceGxmSetFragmentProgram(c, d.program.0.fragment[variants[1]]);
+                sceGxmSetFragmentProgram(c, d.program.0.fragment[variants[1]].1);
             }
             // Context bindings outlive submissions; replace ownership after both native binds.
             *bound = Some(BoundProgram {

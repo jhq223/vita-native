@@ -76,12 +76,56 @@ pub(super) struct FramebufferInner {
     pub target: Rc<RenderTarget>,
     pub surface: SceGxmColorSurface,
     pub encoding: SurfaceEncoding,
+    pub depth_stencil: Option<DepthStencil>,
     pub owner: Rc<Core>,
+}
+pub(super) struct DepthStencilInner {
+    pub depth: Allocation,
+    pub stencil: Allocation,
+    pub surface: SceGxmDepthStencilSurface,
+    pub size: [u32; 2],
+    pub owner: Rc<Core>,
+}
+/// Owned tiled DF32/S8 planes retained by every framebuffer and submission.
+#[derive(Clone)]
+pub struct DepthStencil(pub(super) Rc<DepthStencilInner>);
+impl DepthStencil {
+    /// Logical attachment size, before native tile padding.
+    pub fn size(&self) -> [u32; 2] {
+        self.0.size
+    }
+    /// Live depth and stencil payload, charged to the context's CDRAM arena.
+    pub fn allocated_bytes(&self) -> usize {
+        self.0.depth.len() + self.0.stencil.len()
+    }
 }
 /// Render-target scheduling backing plus a sampled view of its color allocation.
 #[derive(Clone)]
-pub struct Framebuffer(pub(super) Rc<FramebufferInner>);
+pub struct Framebuffer(
+    pub(super) Rc<FramebufferInner>,
+    pub(super) Option<super::target_region::WriteRegion>,
+);
 impl Framebuffer {
+    /// Return a per-use write window sharing the same storage and sampled texture.
+    /// `None` restores complete physical writes. A rectangle uses x/y/width/height;
+    /// its edges must align to 32 pixels or the physical right/bottom edge.
+    /// Draws and clears are intersected with this window, while viewport and
+    /// sampled coordinates retain their original dimensions. Changing the
+    /// window starts another scene. Macrotile cells require complete writes.
+    /// The caller must include every subsequently sampled texel, including
+    /// linear-filter neighbors, padding and address-mode wraparound.
+    pub fn with_write_region(&self, region: Option<[u32; 4]>) -> Result<Self> {
+        let region = region
+            .map(|rect| {
+                super::target_region::WriteRegion::new(
+                    rect,
+                    self.size(),
+                    self.macrocell().is_some(),
+                )
+            })
+            .transpose()?;
+        Ok(Self(self.0.clone(), region))
+    }
     pub(super) fn macrocell(&self) -> Option<super::macrotile::Cell> {
         self.0.texture.0.macrocell
     }
@@ -667,6 +711,115 @@ impl Context {
     ) -> Result<Framebuffer> {
         self.create_framebuffer(t, SurfaceKind::Offscreen, encoding)
     }
+    /// Allocate single-sample depth/stencil planes initialized to the supplied
+    /// values. Native load/store preserves these planes across scene boundaries.
+    pub fn depth_stencil(&self, size: [u32; 2], depth: f32, stencil: u8) -> Result<DepthStencil> {
+        self.check("depth/stencil creation")?;
+        if !depth.is_finite() || !(0.0..=1.0).contains(&depth) {
+            return Err(Error::Invalid("depth initialization (0..1)"));
+        }
+        let layout = depth_stencil_layout(size)?;
+        let d = self.0.core.pixels.alloc(
+            layout.depth_bytes,
+            SCE_GXM_DEPTHSTENCIL_SURFACE_ALIGNMENT as usize,
+        )?;
+        let s = self.0.core.pixels.alloc(
+            layout.stencil_bytes,
+            SCE_GXM_DEPTHSTENCIL_SURFACE_ALIGNMENT as usize,
+        )?;
+        // SAFETY: fresh, exclusively owned mapped allocations cover every sample.
+        unsafe {
+            core::slice::from_raw_parts_mut(d.ptr().cast::<f32>(), layout.depth_bytes / 4)
+                .fill(depth);
+            core::ptr::write_bytes(s.ptr().cast::<u8>(), stencil, layout.stencil_bytes);
+        }
+        let mut surface = unsafe { core::mem::zeroed() };
+        sdk("sceGxmDepthStencilSurfaceInit", unsafe {
+            sceGxmDepthStencilSurfaceInit(
+                &mut surface,
+                SCE_GXM_DEPTH_STENCIL_FORMAT_DF32_S8,
+                SCE_GXM_DEPTH_STENCIL_SURFACE_TILED,
+                layout.stride,
+                d.ptr().cast(),
+                s.ptr().cast(),
+            )
+        })?;
+        // SAFETY: initialized surface and both mapped planes outlive native use.
+        unsafe {
+            sceGxmDepthStencilSurfaceSetForceLoadMode(
+                &mut surface,
+                SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED,
+            );
+            sceGxmDepthStencilSurfaceSetForceStoreMode(
+                &mut surface,
+                SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED,
+            );
+        }
+        Ok(DepthStencil(Rc::new(DepthStencilInner {
+            depth: d,
+            stencil: s,
+            surface,
+            size,
+            owner: self.0.core.clone(),
+        })))
+    }
+    /// Attach independently owned depth/stencil storage to an offscreen color
+    /// surface of the same logical size. Both remain retained through completion.
+    pub fn framebuffer_with_depth_stencil(
+        &self,
+        t: &Texture,
+        depth: &DepthStencil,
+        encoding: SurfaceEncoding,
+    ) -> Result<Framebuffer> {
+        self.same(&depth.0.owner)?;
+        if t.0.macrocell.is_some() {
+            return Err(Error::Unsupported("depth/stencil on a macrotile cell"));
+        }
+        if t.size() != depth.size() {
+            return Err(Error::Invalid("depth/stencil attachment extent"));
+        }
+        let mut framebuffer = self.create_framebuffer(t, SurfaceKind::Offscreen, encoding)?;
+        Rc::get_mut(&mut framebuffer.0)
+            .expect("new framebuffer")
+            .depth_stencil = Some(depth.clone());
+        Ok(framebuffer)
+    }
+    /// Fill complete planes after waiting for their real GPU users. Either plane
+    /// may be preserved. Partial or masked clears belong in a rendering program.
+    pub fn clear_depth_stencil(
+        &self,
+        target: &DepthStencil,
+        depth: Option<f32>,
+        stencil: Option<u8>,
+    ) -> Result<()> {
+        self.same(&target.0.owner)?;
+        if depth.is_some_and(|d| !d.is_finite() || !(0.0..=1.0).contains(&d)) {
+            return Err(Error::Invalid("depth clear (0..1)"));
+        }
+        if let Some(value) = depth {
+            self.await_allocation(&target.0.depth)?;
+            // SAFETY: completion drained all GPU readers/writers of this plane.
+            unsafe {
+                core::slice::from_raw_parts_mut(
+                    target.0.depth.ptr().cast::<f32>(),
+                    target.0.depth.len() / 4,
+                )
+                .fill(value);
+            }
+        }
+        if let Some(value) = stencil {
+            self.await_allocation(&target.0.stencil)?;
+            // SAFETY: completion drained all GPU readers/writers of this plane.
+            unsafe {
+                core::ptr::write_bytes(
+                    target.0.stencil.ptr().cast::<u8>(),
+                    value,
+                    target.0.stencil.len(),
+                );
+            }
+        }
+        Ok(())
+    }
     pub(super) fn create_framebuffer(
         &self,
         t: &Texture,
@@ -731,14 +884,18 @@ impl Context {
             })?;
         }
         let sync = DisplaySync::new(kind, &self.0.core.fault)?;
-        Ok(Framebuffer(Rc::new(FramebufferInner {
-            texture: t.clone(),
-            target,
-            surface,
-            encoding,
-            sync,
-            owner: self.0.core.clone(),
-        })))
+        Ok(Framebuffer(
+            Rc::new(FramebufferInner {
+                texture: t.clone(),
+                target,
+                surface,
+                encoding,
+                depth_stencil: None,
+                sync,
+                owner: self.0.core.clone(),
+            }),
+            None,
+        ))
     }
     /// Upload immutable interleaved f32 geometry; stride and attribute offsets use floats.
     pub fn vertex_buffer(

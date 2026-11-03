@@ -335,6 +335,8 @@ pub enum Blend {
     Replace,
     /// Premultiplied source-over: source plus destination times one minus source alpha.
     Premultiplied,
+    /// Explicit equation and channel mask, prepared with `create_program_variants`.
+    Custom(super::BlendState),
 }
 /// Offline GXM program, with retained reflection symbols.
 #[derive(Clone, Copy)]
@@ -426,6 +428,31 @@ pub enum FragmentOutput {
     Declared,
 }
 
+/// Intersect raster coverage with physical storage before native submission.
+#[cfg(any(target_os = "vita", test))]
+pub(super) fn draw_clip(
+    viewport: [u32; 2],
+    storage: [u32; 2],
+    scissor: Option<[u32; 4]>,
+    macrocell: bool,
+) -> Result<([u32; 2], [u32; 2])> {
+    if viewport.into_iter().any(|n| n == 0 || n > 4096) {
+        return Err(Error::Invalid("draw viewport (1..4096)"));
+    }
+    if macrocell && (0..2).any(|i| viewport[i] > storage[i]) {
+        return Err(Error::Invalid("logical viewport exceeds target"));
+    }
+    let bounds: [u32; 2] = std::array::from_fn(|i| viewport[i].min(storage[i]));
+    let clip = scissor.unwrap_or([0, 0, bounds[0], bounds[1]]);
+    Ok((
+        [clip[0].min(bounds[0]), clip[1].min(bounds[1])],
+        [
+            clip[0].saturating_add(clip[2]).min(bounds[0]),
+            clip[1].saturating_add(clip[3]).min(bounds[1]),
+        ],
+    ))
+}
+
 /// Whether a rectangle needs fragment clipping in addition to GXM tile clipping.
 /// Color-surface bounds provide exact clipping at the physical allocation edges.
 #[cfg(any(target_os = "vita", test))]
@@ -438,6 +465,32 @@ pub(super) fn needs_fragment_clip(min: [u32; 2], max: [u32; 2], size: [u32; 2]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn larger_raster_viewport_never_expands_physical_coverage() {
+        let viewport = [1883, 394];
+        let storage = [960, 400];
+        assert_eq!(
+            draw_clip(viewport, storage, None, false).unwrap(),
+            ([0, 0], [960, 394])
+        );
+        assert_eq!(
+            draw_clip(viewport, storage, Some([32, 64, u32::MAX, u32::MAX]), false).unwrap(),
+            ([32, 64], [960, 394])
+        );
+        assert_eq!(
+            draw_clip(viewport, storage, Some([961, 0, 100, 100]), false).unwrap(),
+            ([960, 0], [960, 100])
+        );
+        assert!(draw_clip(viewport, storage, None, true).is_err());
+        for invalid in [[0, 1], [4097, 1], [1, u32::MAX]] {
+            assert!(draw_clip(invalid, storage, None, false).is_err());
+        }
+        assert_eq!(
+            draw_clip([64, 64], [128, 128], None, true).unwrap(),
+            ([0, 0], [64, 64])
+        );
+    }
 
     #[test]
     fn surface_edges_and_tiles_cover_scissors_without_a_fragment_uniform() {

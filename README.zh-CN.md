@@ -68,6 +68,17 @@ MAIN 块，每块保留自身的 `sceClibMspace` 与内核 UID。1 MiB 最小 ar
 
 ## 图形
 
+`Context::depth_stencil` 创建按 tile 补齐、具有明确所有权的 DF32/S8 平面，
+并使用传入的深度和模板值初始化。`framebuffer_with_depth_stencil` 将它们附着到
+同尺寸颜色目标；场景提交保留两块存储至完成，并跨场景加载和存储其结果。
+`clear_depth_stencil` 等待使用者完成后清除指定平面。
+
+`draw_with_state` 接收完整 `RasterState`：剔除、深度比较与写入，以及正反面各自的
+模板操作和掩码。状态变化时完整提交，相邻绘制状态相同时复用已有绑定；普通绘制恢复二维默认状态。
+使用深度或模板而未附着存储时返回错误。`create_program_variants` 准备明确的
+`Blend::Custom` 变体，支持独立 RGB/alpha 方程与 RGBA 写掩码；绘制必须选择已准备的变体。
+shader 生成及常量颜色混合模拟由调用方实现。
+
 应用通过 `ProgramDescriptor` 提供离线 GXP、顶点布局和反射参数名。
 片元程序可声明一个 float4 裁剪参数，接收精确到像素的裁剪边界。
 `ClearProgram` 描述应用的清空程序及参数名。程序创建后由绘制复用。
