@@ -19,7 +19,10 @@ pub struct DrawInstances<'a> {
 pub struct Draw<'a> {
     /// Physical output or the current process scanout buffer.
     pub target: Target<'a>,
-    /// Logical viewport extent, bounded by physical storage.
+    /// Raster viewport extent in pixels (1..=4096 on each axis).
+    /// Ordinary targets permit a viewport larger than their physical storage;
+    /// scissor coverage is intersected with both extents. Macrotile draws retain
+    /// their cell's logical extent as the viewport limit.
     pub size: [u32; 2],
     /// Prepared GXP variants and reflected interface.
     pub program: &'a Program,
@@ -108,7 +111,9 @@ impl Context {
                 (Some(previous), Some(next)) => next.follows(previous)?,
                 _ => false,
             };
-            if Rc::ptr_eq(&recording.target.0, &target.0) || same_macrotile {
+            if (Rc::ptr_eq(&recording.target.0, &target.0) && recording.target.1 == target.1)
+                || same_macrotile
+            {
                 self.viewport(target.origin(), size);
                 recording.size = size;
                 if same_macrotile {
@@ -124,9 +129,12 @@ impl Context {
         }
         self.end_scene(&mut s)?;
         let (slot, n) = self.reserve_slot(&mut s)?;
+        let end = target
+            .1
+            .map_or_else(|| target.size(), |region| region.end());
         let region = SceGxmValidRegion {
-            xMax: target.size()[0] - 1,
-            yMax: target.size()[1] - 1,
+            xMax: end[0] - 1,
+            yMax: end[1] - 1,
         };
         let code = self.0.timing.measure(Call::SceneBegin, || unsafe {
             sceGxmBeginScene(
@@ -181,7 +189,8 @@ impl Context {
             );
         }
     }
-    /// Clear the entire physical target through the prepared production GXP program.
+    /// Clear this use's write region through the prepared production GXP program.
+    /// Ordinary framebuffers without a write region cover their physical target.
     /// A macrotile cell includes its padding beyond the logical sampled view.
     pub fn clear(&self, target: Target<'_>, color: [f32; 4]) -> Result<()> {
         let size = match target {
@@ -257,8 +266,7 @@ impl Context {
             }
             _ => return Err(Error::Invalid("draw instance stream")),
         };
-        if d.size.contains(&0)
-            || d.range.start > d.range.end
+        if d.range.start > d.range.end
             || d.textures.len() > 16
             || d.textures.len() < d.program.0.texture_slots
             || d.program.0.stride != d.vertices.stride
@@ -281,15 +289,11 @@ impl Context {
         } else {
             target.size()
         };
-        if (0..2).any(|i| d.size[i] > bounds[i]) {
-            return Err(Error::Invalid("logical viewport exceeds target"));
-        }
-        let scissor = d.scissor.unwrap_or([0, 0, d.size[0], d.size[1]]);
-        let min = [scissor[0].min(d.size[0]), scissor[1].min(d.size[1])];
-        let max = [
-            scissor[0].saturating_add(scissor[2]).min(d.size[0]),
-            scissor[1].saturating_add(scissor[3]).min(d.size[1]),
-        ];
+        let (min, max) =
+            super::types::draw_clip(d.size, bounds, d.scissor, target.macrocell().is_some())?;
+        let (min, max) = target
+            .1
+            .map_or((min, max), |region| region.intersect(min, max));
         if d.range.is_empty()
             || instance_draw.is_some_and(|draw| draw.count == 0)
             || min[0] >= max[0]
@@ -302,7 +306,7 @@ impl Context {
         }
         for t in d.textures {
             self.same(&t.0.owner)?;
-            if Rc::ptr_eq(&t.0, &target.0.texture.0) {
+            if t.0.allocation.id() == target.0.texture.0.allocation.id() {
                 return Err(Error::Invalid("same scene texture feedback"));
             }
             if let (Some(source), Some(destination)) = (t.0.macrocell, target.macrocell())

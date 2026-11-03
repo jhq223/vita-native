@@ -80,8 +80,31 @@ pub(super) struct FramebufferInner {
 }
 /// Render-target scheduling backing plus a sampled view of its color allocation.
 #[derive(Clone)]
-pub struct Framebuffer(pub(super) Rc<FramebufferInner>);
+pub struct Framebuffer(
+    pub(super) Rc<FramebufferInner>,
+    pub(super) Option<super::target_region::WriteRegion>,
+);
 impl Framebuffer {
+    /// Return a per-use write window sharing the same storage and sampled texture.
+    /// `None` restores complete physical writes. A rectangle uses x/y/width/height;
+    /// its edges must align to 32 pixels or the physical right/bottom edge.
+    /// Draws and clears are intersected with this window, while viewport and
+    /// sampled coordinates retain their original dimensions. Changing the
+    /// window starts another scene. Macrotile cells require complete writes.
+    /// The caller must include every subsequently sampled texel, including
+    /// linear-filter neighbors, padding and address-mode wraparound.
+    pub fn with_write_region(&self, region: Option<[u32; 4]>) -> Result<Self> {
+        let region = region
+            .map(|rect| {
+                super::target_region::WriteRegion::new(
+                    rect,
+                    self.size(),
+                    self.macrocell().is_some(),
+                )
+            })
+            .transpose()?;
+        Ok(Self(self.0.clone(), region))
+    }
     pub(super) fn macrocell(&self) -> Option<super::macrotile::Cell> {
         self.0.texture.0.macrocell
     }
@@ -731,14 +754,17 @@ impl Context {
             })?;
         }
         let sync = DisplaySync::new(kind, &self.0.core.fault)?;
-        Ok(Framebuffer(Rc::new(FramebufferInner {
-            texture: t.clone(),
-            target,
-            surface,
-            encoding,
-            sync,
-            owner: self.0.core.clone(),
-        })))
+        Ok(Framebuffer(
+            Rc::new(FramebufferInner {
+                texture: t.clone(),
+                target,
+                surface,
+                encoding,
+                sync,
+                owner: self.0.core.clone(),
+            }),
+            None,
+        ))
     }
     /// Upload immutable interleaved f32 geometry; stride and attribute offsets use floats.
     pub fn vertex_buffer(

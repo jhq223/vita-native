@@ -662,23 +662,39 @@ impl Context {
     pub(super) fn await_allocation(&self, allocation: &Allocation) -> Result<()> {
         let mut s = self.0.state.borrow_mut();
         self.check("resource wait")?;
+        // Scanout also has external display users, independent of fragment and
+        // transfer notifications. Public ordinary target views never expose
+        // these context-owned buffers; preserve their separate display boundary.
+        if !self.0.display_detached.get()
+            && self
+                .0
+                .screens
+                .borrow()
+                .iter()
+                .any(|screen| screen.0.texture.0.allocation.id() == allocation.id())
+        {
+            return Err(Error::Invalid("allocation has an external display lease"));
+        }
+        // Every recording/flight access retains an Allocation clone. A unique
+        // owner therefore proves there is no GPU work to poll or wait for.
+        if !allocation.used() {
+            return Ok(());
+        }
         if s.recording
             .as_ref()
             .is_some_and(|r| r.leases.iter().any(|l| l.uses(allocation)))
         {
             self.end_scene(&mut s)?;
         }
-        while allocation.used() {
+        loop {
             self.poll_state(&mut s)?;
-            if !allocation.used() {
+            // Multiple immutable texture descriptors can share this allocation.
+            // Scene/transfer access is retained explicitly in these tokens; an
+            // ordinary descriptor reference is an owner, not pending GPU work.
+            let Some(token) = super::completion::pending_lease(&s.flights, |l| l.uses(allocation))
+            else {
                 break;
-            }
-            let token = &s
-                .flights
-                .iter()
-                .find(|f| f.token.leases.borrow().iter().any(|l| l.uses(allocation)))
-                .ok_or(Error::Invalid("allocation has an external native lease"))?
-                .token;
+            };
             self.command(
                 "sceGxmNotificationWait(resource replacement)",
                 self.0

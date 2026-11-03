@@ -150,14 +150,17 @@ impl Context {
                     atlas.0.allocation.ptr().cast(),
                 )
             })?;
-            cells.push(Framebuffer(Rc::new(FramebufferInner {
-                sync: DisplaySync::new(SurfaceKind::Offscreen, &self.0.core.fault)?,
-                texture,
-                target: target.clone(),
-                surface,
-                encoding: crate::graphics::SurfaceEncoding::Linear,
-                owner: self.0.core.clone(),
-            })));
+            cells.push(Framebuffer(
+                Rc::new(FramebufferInner {
+                    sync: DisplaySync::new(SurfaceKind::Offscreen, &self.0.core.fault)?,
+                    texture,
+                    target: target.clone(),
+                    surface,
+                    encoding: crate::graphics::SurfaceEncoding::Linear,
+                    owner: self.0.core.clone(),
+                }),
+                None,
+            ));
         }
         Ok(MacrotileTarget {
             layout,

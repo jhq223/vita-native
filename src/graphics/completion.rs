@@ -39,6 +39,17 @@ pub(super) struct Flight<T> {
     pub token: Rc<Completion<T>>,
 }
 
+/// Locate actual submitted access independently of descriptor reference counts.
+pub(super) fn pending_lease<T>(
+    flights: &VecDeque<Flight<T>>,
+    mut uses: impl FnMut(&T) -> bool,
+) -> Option<&Rc<Completion<T>>> {
+    flights
+        .iter()
+        .find(|flight| flight.token.leases.borrow().iter().any(&mut uses))
+        .map(|flight| &flight.token)
+}
+
 pub(super) fn collect<T>(
     flights: &mut VecDeque<Flight<T>>,
     free: &mut Vec<usize>,
@@ -114,6 +125,72 @@ mod tests {
             #[cfg(feature = "profiling")]
             profile: Default::default(),
         })
+    }
+
+    #[test]
+    fn shared_descriptors_remain_owned_after_the_last_real_gpu_reader_finishes() {
+        let memory = Rc::new(RefCell::new(FreeList::new(16)));
+        let old_view = allocate(&memory, 16);
+        let new_view = old_view.clone();
+        let notification = Cell::new(0);
+        let token = completion(&notification, 1, std::vec![old_view.clone()]);
+        let mut flights = VecDeque::from([Flight {
+            slot: 0,
+            token: token.clone(),
+        }]);
+        let uses = |owner: &Rc<Allocation>| Rc::ptr_eq(owner, &new_view);
+        assert_eq!(Rc::strong_count(&old_view), 3);
+        assert!(Rc::ptr_eq(pending_lease(&flights, uses).unwrap(), &token));
+        collect(&mut flights, &mut Vec::new(), || Ok(())).unwrap();
+        assert!(pending_lease(&flights, uses).is_some());
+        assert_eq!(memory.borrow().bytes(), 0);
+
+        // The same completion collection used by finish/readback retires only
+        // the GPU lease. Both immutable views continue to own the allocation.
+        notification.set(1);
+        collect(&mut flights, &mut Vec::new(), || Ok(())).unwrap();
+        assert!(pending_lease(&flights, uses).is_none());
+        assert_eq!(Rc::strong_count(&old_view), 2);
+        assert_eq!(memory.borrow().bytes(), 0);
+        drop(old_view);
+        assert_eq!(memory.borrow().bytes(), 0);
+        drop(new_view);
+        assert_eq!(memory.borrow().bytes(), 16);
+    }
+
+    #[test]
+    fn allocation_identity_selects_only_its_pending_scene_or_transfer() {
+        let notifications = [Cell::new(0), Cell::new(0)];
+        let first = completion(&notifications[0], 1, std::vec![11usize, 17]);
+        let second = completion(&notifications[1], 2, std::vec![23usize, 11]);
+        let mut flights = VecDeque::from([
+            Flight {
+                slot: 0,
+                token: first.clone(),
+            },
+            Flight {
+                slot: 1,
+                token: second.clone(),
+            },
+        ]);
+        assert!(Rc::ptr_eq(
+            pending_lease(&flights, |&id| id == 11).unwrap(),
+            &first
+        ));
+        assert!(Rc::ptr_eq(
+            pending_lease(&flights, |&id| id == 23).unwrap(),
+            &second
+        ));
+        assert!(pending_lease(&flights, |&id| id == 29).is_none());
+        notifications[0].set(1);
+        collect(&mut flights, &mut Vec::new(), || Ok(())).unwrap();
+        assert!(Rc::ptr_eq(
+            pending_lease(&flights, |&id| id == 11).unwrap(),
+            &second
+        ));
+        notifications[1].set(2);
+        collect(&mut flights, &mut Vec::new(), || Ok(())).unwrap();
+        assert!(pending_lease(&flights, |&id| id == 11).is_none());
     }
 
     #[cfg(feature = "profiling")]
