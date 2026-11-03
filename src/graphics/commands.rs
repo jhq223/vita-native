@@ -151,14 +151,23 @@ impl Context {
                 // transfer dependencies. This object only gates display queue access.
                 target.0.sync.raw(),
                 &target.0.surface,
-                core::ptr::null(),
+                target
+                    .0
+                    .depth_stencil
+                    .as_ref()
+                    .map_or(core::ptr::null(), |d| &d.0.surface),
             )
         });
         let allocation = target.0.texture.0.allocation.clone();
         let origin = target.origin();
+        let mut leases = std::vec![Lease::Allocation(allocation), Lease::Target(target.clone())];
+        if let Some(depth) = &target.0.depth_stencil {
+            leases.push(Lease::Allocation(depth.0.depth.clone()));
+            leases.push(Lease::Allocation(depth.0.stencil.clone()));
+        }
         s.recording = Some(Recording {
             target: target.clone(),
-            leases: std::vec![Lease::Allocation(allocation), Lease::Target(target)],
+            leases,
             slot,
             notification: n.value,
             size,
@@ -221,6 +230,7 @@ impl Context {
             },
             TextureFilter::Linear,
             true,
+            RasterState::default(),
         )
     }
     /// Submit a direct draw with linear minification and magnification.
@@ -229,13 +239,24 @@ impl Context {
     }
     /// Submit one indexed hardware draw, retaining its exact owners through fragment completion.
     pub fn draw_filtered(&self, d: Draw<'_>, filter: TextureFilter) -> Result<()> {
-        self.draw_filtered_impl(d, filter, false)
+        self.draw_with_state(d, filter, RasterState::default())
+    }
+    /// Submit with explicit raster/depth/stencil state. Depth or stencil access
+    /// requires a framebuffer attachment. Changed state is applied in full.
+    pub fn draw_with_state(
+        &self,
+        d: Draw<'_>,
+        filter: TextureFilter,
+        state: RasterState,
+    ) -> Result<()> {
+        self.draw_filtered_impl(d, filter, false, state)
     }
     fn draw_filtered_impl(
         &self,
         d: Draw<'_>,
         filter: TextureFilter,
         full_clear: bool,
+        state: RasterState,
     ) -> Result<()> {
         self.same(&d.program.0.owner)?;
         if d.program.0.output == FragmentOutput::Declared && d.blend != Blend::Replace {
@@ -275,6 +296,16 @@ impl Context {
             return Err(Error::Invalid("draw layout or range"));
         }
         let target = self.target(d.target)?;
+        if state.requires_depth_stencil() && target.0.depth_stencil.is_none() {
+            return Err(Error::Invalid("draw requires a depth/stencil attachment"));
+        }
+        let blend_index = d
+            .program
+            .0
+            .fragment
+            .iter()
+            .position(|(blend, _)| *blend == d.blend)
+            .ok_or(Error::Invalid("blend variant was not prepared"))?;
         if (target.encoding() == SurfaceEncoding::Srgb)
             != (d.program.0.output == FragmentOutput::Srgb)
         {
@@ -351,6 +382,7 @@ impl Context {
         let min = [min[0] + origin[0], min[1] + origin[1]];
         let max = [max[0] + origin[0], max[1] + origin[1]];
         self.begin(target, d.size)?;
+        super::pipeline_native::apply(self, state);
         let mut s = self.0.state.borrow_mut();
         let r = s.recording.as_mut().expect("active scene");
         Self::retain(r, Lease::Program(d.program.clone()));
@@ -363,10 +395,7 @@ impl Context {
             Self::retain(r, Lease::Allocation(t.0.allocation.clone()));
         }
         let c = self.0.core.native.context;
-        let variants = [
-            usize::from(index_width == 4),
-            usize::from(d.blend == Blend::Premultiplied),
-        ];
+        let variants = [usize::from(index_width == 4), blend_index];
         let mut bound = self.0.bound_program.borrow_mut();
         if bound
             .as_ref()
@@ -374,7 +403,7 @@ impl Context {
         {
             unsafe {
                 sceGxmSetVertexProgram(c, d.program.0.vertex[variants[0]]);
-                sceGxmSetFragmentProgram(c, d.program.0.fragment[variants[1]]);
+                sceGxmSetFragmentProgram(c, d.program.0.fragment[variants[1]].1);
             }
             // Context bindings outlive submissions; replace ownership after both native binds.
             *bound = Some(BoundProgram {

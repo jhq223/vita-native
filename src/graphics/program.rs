@@ -50,7 +50,7 @@ pub(super) struct ProgramInner {
     vertex_id: SceGxmShaderPatcherId,
     fragment_id: SceGxmShaderPatcherId,
     pub vertex: [*mut SceGxmVertexProgram; 2],
-    pub fragment: [*mut SceGxmFragmentProgram; 2],
+    pub fragment: Vec<(Blend, *mut SceGxmFragmentProgram)>,
     pub clip: Option<Parameter>,
     pub uniform_sizes: [u32; 2],
     pub texture_slots: usize,
@@ -66,7 +66,7 @@ impl Drop for ProgramInner {
             return;
         }
         let p = self.owner.native.patcher;
-        for fragment in self.fragment {
+        for &(_, fragment) in &self.fragment {
             if !fragment.is_null()
                 && f.command("release fragment GXP", unsafe {
                     sceGxmShaderPatcherReleaseFragmentProgram(p, fragment)
@@ -282,6 +282,34 @@ impl Context {
     /// Patched output supports both blend modes; declared output owns blending.
     /// Stride and offsets use f32 elements.
     pub fn create_program(&self, descriptor: ProgramDescriptor<'_>) -> Result<Program> {
+        let blends: &[Blend] = if descriptor.output == FragmentOutput::Declared {
+            &[Blend::Replace]
+        } else {
+            &[Blend::Replace, Blend::Premultiplied]
+        };
+        self.create_program_variants(descriptor, blends)
+    }
+    /// Prepare one through 64 explicit output variants. Draws select an exact
+    /// `Blend` value; no compilation or unbounded variant cache occurs at draw time.
+    /// Declared-output programs require exactly `Blend::Replace`.
+    pub fn create_program_variants(
+        &self,
+        descriptor: ProgramDescriptor<'_>,
+        blends: &[Blend],
+    ) -> Result<Program> {
+        if blends.is_empty()
+            || blends.len() > 64
+            || (descriptor.output == FragmentOutput::Declared && blends != [Blend::Replace])
+        {
+            return Err(Error::Invalid("program blend variants"));
+        }
+        if blends
+            .iter()
+            .enumerate()
+            .any(|(i, b)| blends[..i].contains(b))
+        {
+            return Err(Error::Invalid("duplicate blend variant"));
+        }
         let ProgramDescriptor {
             output,
             vertex,
@@ -353,7 +381,7 @@ impl Context {
             vertex_id: core::ptr::null_mut(),
             fragment_id: core::ptr::null_mut(),
             vertex: [core::ptr::null_mut(); 2],
-            fragment: [core::ptr::null_mut(); 2],
+            fragment: blends.iter().map(|&b| (b, core::ptr::null_mut())).collect(),
             clip,
             stride,
             attributes: attributes.to_vec(),
@@ -433,36 +461,8 @@ impl Context {
                 )
             })?;
         }
-        let variants = if output == FragmentOutput::Declared {
-            1
-        } else {
-            2
-        };
-        for blend in 0..variants {
-            let mut info: SceGxmBlendInfo = unsafe { core::mem::zeroed() };
-            info.colorMask = SCE_GXM_COLOR_MASK_ALL as u8;
-            info.set_colorFunc(if blend == 0 {
-                SCE_GXM_BLEND_FUNC_NONE
-            } else {
-                SCE_GXM_BLEND_FUNC_ADD
-            } as u8);
-            info.set_alphaFunc(if blend == 0 {
-                SCE_GXM_BLEND_FUNC_NONE
-            } else {
-                SCE_GXM_BLEND_FUNC_ADD
-            } as u8);
-            info.set_colorSrc(SCE_GXM_BLEND_FACTOR_ONE as u8);
-            info.set_alphaSrc(SCE_GXM_BLEND_FACTOR_ONE as u8);
-            info.set_colorDst(if blend == 0 {
-                SCE_GXM_BLEND_FACTOR_ZERO
-            } else {
-                SCE_GXM_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
-            } as u8);
-            info.set_alphaDst(if blend == 0 {
-                SCE_GXM_BLEND_FACTOR_ZERO
-            } else {
-                SCE_GXM_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
-            } as u8);
+        for blend in 0..inner.fragment.len() {
+            let info = super::pipeline_native::blend(inner.fragment[blend].0);
             sdk("patch fragment GXP", unsafe {
                 sceGxmShaderPatcherCreateFragmentProgram(
                     p,
@@ -481,7 +481,7 @@ impl Context {
                         &info
                     },
                     inner.vertex_code.ptr(),
-                    &mut inner.fragment[blend],
+                    &mut inner.fragment[blend].1,
                 )
             })?;
         }

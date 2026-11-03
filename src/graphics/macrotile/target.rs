@@ -157,6 +157,7 @@ impl Context {
                     target: target.clone(),
                     surface,
                     encoding: crate::graphics::SurfaceEncoding::Linear,
+                    depth_stencil: None,
                     owner: self.0.core.clone(),
                 }),
                 None,

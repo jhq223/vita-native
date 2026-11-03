@@ -19,6 +19,8 @@ mod fault;
 #[cfg(any(target_os = "vita", test))]
 mod gxp;
 mod layout;
+mod pipeline;
+pub use pipeline::*;
 #[cfg(any(target_os = "vita", test))]
 mod leases;
 mod macrotile;
@@ -59,6 +61,8 @@ mod device;
 #[cfg(target_os = "vita")]
 mod memory;
 #[cfg(target_os = "vita")]
+mod pipeline_native;
+#[cfg(target_os = "vita")]
 mod program;
 #[cfg(target_os = "vita")]
 mod resources;
@@ -71,4 +75,4 @@ pub use device::{Context, Fence};
 #[cfg(target_os = "vita")]
 pub use program::{Program, Uniform, UniformValue};
 #[cfg(target_os = "vita")]
-pub use resources::{Framebuffer, IndexBuffer, Target, Texture, VertexBuffer};
+pub use resources::{DepthStencil, Framebuffer, IndexBuffer, Target, Texture, VertexBuffer};

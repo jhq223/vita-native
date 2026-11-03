@@ -335,6 +335,8 @@ pub enum Blend {
     Replace,
     /// Premultiplied source-over: source plus destination times one minus source alpha.
     Premultiplied,
+    /// Explicit equation and channel mask, prepared with `create_program_variants`.
+    Custom(super::BlendState),
 }
 /// Offline GXM program, with retained reflection symbols.
 #[derive(Clone, Copy)]
